@@ -12,7 +12,7 @@ from core.models import Coin, Checkpoint
 
 from ingestion.coingecko import ingest_coingecko
 from ingestion.csvingest import ingest_csv
-from ingestion.extracsvingest import ingest_extra_csv
+# from ingestion.extracsvingest import ingest_extra_csv  # DISABLED (empty file)
 
 log = get_logger(__name__)
 
@@ -27,35 +27,26 @@ async def _background_startup():
 
     db_timeout = int(os.getenv("DB_STARTUP_TIMEOUT", "30"))
     start = asyncio.get_event_loop().time()
-    db_ready = False
 
-    # Wait until Postgres is reachable
     while asyncio.get_event_loop().time() - start < db_timeout:
         try:
             await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: psycopg2.connect(os.getenv("DATABASE_URL")),
             )
-            db_ready = True
             break
         except Exception as e:
             log.warning(f"DB not ready yet: {e}")
             await asyncio.sleep(1)
 
-    if db_ready:
-        try:
-            engine.dispose()
-            log.info("DB ready, SQLAlchemy engine disposed")
-        except Exception:
-            pass
-    else:
-        log.warning("DB not ready after timeout, continuing anyway")
+    try:
+        engine.dispose()
+    except Exception:
+        pass
 
-    # Run all ingestions sequentially
     try:
         await asyncio.to_thread(ingest_coingecko)
         await asyncio.to_thread(ingest_csv)
-        await asyncio.to_thread(ingest_extra_csv)
         log.info("All background ingestions completed")
     except Exception as e:
         log.error(f"Background ingestion failed: {e}")
@@ -87,49 +78,54 @@ async def health() -> Dict[str, object]:
     except Exception:
         db_ok = False
 
-    etl_status = {}
-    try:
-        with SessionLocal() as s:
-            cps = s.query(Checkpoint).all()
-            for c in cps:
-                etl_status[c.source] = {
-                    "last_run": c.last_run.isoformat() if c.last_run else None,
-                    "last_value": c.last_value,
-                }
-    except Exception:
-        pass
-
-    return {"status": "ok", "db": db_ok, "etl": etl_status}
+    return {"status": "ok", "db": db_ok}
 
 
 # --------------------------------------------------
-# Stats endpoint (P1 requirement)
+# Stats endpoint (FINAL – SCHEMA SAFE)
 # --------------------------------------------------
 @app.get("/stats")
 def stats():
     try:
         with SessionLocal() as s:
-            cps = s.query(Checkpoint).all()
-            result = {}
-            for c in cps:
-                result[c.source] = {
-                    "last_run": c.last_run.isoformat() if c.last_run else None,
-                    "last_value": c.last_value,
-                }
-        return {"etl_stats": result}
+            total_records = s.query(Coin).count()
+
+            min_price, max_price, avg_price = s.execute(
+                text("""
+                    SELECT
+                        MIN(price_usd),
+                        MAX(price_usd),
+                        AVG(price_usd)
+                    FROM coins
+                """)
+            ).one()
+
+            return {
+                "total_records": total_records,
+                "price_stats": {
+                    "min": float(min_price) if min_price is not None else None,
+                    "max": float(max_price) if max_price is not None else None,
+                    "avg": float(avg_price) if avg_price is not None else None,
+                },
+            }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 # --------------------------------------------------
-# Data endpoint
+# Data endpoint (FINAL – SCHEMA SAFE)
 # --------------------------------------------------
 @app.get("/data")
 def get_data(
     page: int = Query(1, ge=1),
-    per_page: int = Query(10, ge=1, le=100),
+    limit: int = Query(10, ge=1, le=100),
     symbol: str | None = None,
     name: str | None = None,
+    min_price: float | None = None,
+    max_price: float | None = None,
+    sort: str = "price_usd",
+    order: str = "desc",
 ):
     request_id = str(uuid.uuid4())
     start_time = time.time()
@@ -140,13 +136,32 @@ def get_data(
 
             if symbol:
                 q = q.filter(Coin.symbol.ilike(f"%{symbol}%"))
+
             if name:
                 q = q.filter(Coin.name.ilike(f"%{name}%"))
 
+            if min_price is not None:
+                q = q.filter(Coin.price_usd >= min_price)
+
+            if max_price is not None:
+                q = q.filter(Coin.price_usd <= max_price)
+
+            allowed_sorts = {
+                "price_usd": Coin.price_usd,
+                "market_cap": Coin.market_cap,
+            }
+            sort_col = allowed_sorts.get(sort, Coin.price_usd)
+
+            if order.lower() == "asc":
+                q = q.order_by(sort_col.asc())
+            else:
+                q = q.order_by(sort_col.desc())
+
             total = q.count()
+
             rows = (
-                q.offset((page - 1) * per_page)
-                .limit(per_page)
+                q.offset((page - 1) * limit)
+                .limit(limit)
                 .all()
             )
 
@@ -169,8 +184,10 @@ def get_data(
     return {
         "request_id": request_id,
         "api_latency_ms": latency_ms,
-        "page": page,
-        "per_page": per_page,
-        "total": total,
-        "items": items,
+        "data": items,
+        "meta": {
+            "page": page,
+            "limit": limit,
+            "total_records": total,
+        },
     }
