@@ -1,0 +1,47 @@
+services:
+  db:
+    image: postgres:15
+    container_name: kasparro_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: kasparro
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  init-db:
+    build: .
+    container_name: kasparro_init_db
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["python", "-m", "scripts.init_db"]
+    restart: "no"
+    env_file:
+      - .env
+
+  api:
+    build: .
+    container_name: kasparro_api
+    depends_on:
+      db:
+        condition: service_healthy
+      init-db:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    restart: always
+
+volumes:
+  postgres_data:
