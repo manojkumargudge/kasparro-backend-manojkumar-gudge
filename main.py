@@ -12,7 +12,7 @@ from core.models import Coin, Checkpoint
 
 from ingestion.coingecko import ingest_coingecko
 from ingestion.csvingest import ingest_csv
-# from ingestion.extracsvingest import ingest_extra_csv  # DISABLED (empty file)
+from ingestion.coinpaprika import ingest_coins
 
 log = get_logger(__name__)
 
@@ -47,6 +47,7 @@ async def _background_startup():
     try:
         await asyncio.to_thread(ingest_coingecko)
         await asyncio.to_thread(ingest_csv)
+        await asyncio.to_thread(ingest_coins)
         log.info("All background ingestions completed")
     except Exception as e:
         log.error(f"Background ingestion failed: {e}")

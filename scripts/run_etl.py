@@ -7,6 +7,7 @@ sys.path.append(PROJECT_ROOT)
 
 from ingestion.coingecko import ingest_coingecko
 from ingestion.csvingest import ingest_csv
+from ingestion.coinpaprika import ingest_coins
 from core.logger import get_logger
 
 log = get_logger(__name__)
@@ -16,6 +17,7 @@ def run():
         log.info("Starting scheduled ETL job")
         ingest_coingecko()
         ingest_csv()
+        ingest_coins()
         log.info("Scheduled ETL completed successfully")
     except Exception as e:
         log.error(f"Scheduled ETL failed: {e}")

@@ -28,4 +28,19 @@ def test_get_data():
     assert r.status_code == 200
     body = r.json()
     assert 'request_id' in body
-    assert body['total'] >= 1
+    assert 'meta' in body
+    assert body['meta']['total_records'] >= 1
+
+def test_health():
+    r = client.get('/health')
+    assert r.status_code == 200
+    body = r.json()
+    assert body['status'] == 'ok'
+    assert 'db' in body
+
+def test_stats():
+    r = client.get('/stats')
+    assert r.status_code == 200
+    body = r.json()
+    assert 'total_records' in body
+    assert 'price_stats' in body

@@ -38,36 +38,43 @@ def ingest_coingecko():
 
     try:
         linked = 0
+        errors = 0
 
         for item in data:
-            symbol = (item.get("symbol") or "").strip().upper()
-            name = item.get("name")
-            source_coin_id = item.get("id")
+            try:
+                symbol = (item.get("symbol") or "").strip().upper()
+                name = item.get("name")
+                source_coin_id = item.get("id")
 
-            if not symbol or not source_coin_id:
-                continue
+                if not symbol or not source_coin_id:
+                    continue
 
-            # 🔹 NORMALIZATION STARTS HERE
-            coin = get_or_create_coin(
-                db=db,
-                symbol=symbol,
-                name=name
-            )
+                # 🔹 NORMALIZATION STARTS HERE
+                coin = get_or_create_coin(
+                    db=db,
+                    symbol=symbol,
+                    name=name
+                )
 
-            # update market data if present
-            coin.price_usd = float(item.get("current_price") or 0)
-            coin.market_cap = float(item.get("market_cap") or 0)
+                # update market data if present
+                coin.price_usd = float(item.get("current_price") or 0)
+                coin.market_cap = float(item.get("market_cap") or 0)
 
-            link_source(
-                db=db,
-                coin_id=coin.id,
-                source="coingecko",
-                source_coin_id=source_coin_id
-            )
+                link_source(
+                    db=db,
+                    coin_id=coin.id,
+                    source="coingecko",
+                    source_coin_id=source_coin_id
+                )
 
-            linked += 1
+                db.commit()
+                linked += 1
+            except Exception as rec_err:
+                db.rollback()
+                log.error(f"Failed to ingest record: {rec_err}")
+                errors += 1
 
-        db.commit()
+        log.info(f"CoinGecko ingestion: {linked} records linked, {errors} errors.")
 
         meta = _json.dumps({
             "source_count": len(data),
