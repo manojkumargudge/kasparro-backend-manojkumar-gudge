@@ -23,14 +23,33 @@ PARAMS = {
 def ingest_coingecko():
     log.info("Starting CoinGecko ingestion")
 
-    try:
-        response = requests.get(COINGECKO_URL, params=PARAMS, timeout=10)
-        response.raise_for_status()
-        log.info("CoinGecko API success")
-        data = response.json()
-    except Exception as e:
-        log.error(f"CoinGecko API failed: {e}")
-        return
+    # Rate limiting and exponential backoff
+    max_retries = int(os.getenv("COINGECKO_MAX_RETRIES", "5"))
+    min_interval = float(os.getenv("COINGECKO_MIN_INTERVAL", "1.0"))  # seconds
+    last_call_time = getattr(ingest_coingecko, "_last_call_time", None)
+    import time
+    if last_call_time:
+        elapsed = time.time() - last_call_time
+        if elapsed < min_interval:
+            log.info(f"Rate limiting: sleeping {min_interval - elapsed:.2f}s before API call")
+            time.sleep(min_interval - elapsed)
+    ingest_coingecko._last_call_time = time.time()
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.get(COINGECKO_URL, params=PARAMS, timeout=10)
+            response.raise_for_status()
+            log.info(f"CoinGecko API success (attempt {attempt})")
+            data = response.json()
+            break
+        except Exception as e:
+            log.error(f"CoinGecko API failed (attempt {attempt}): {e}")
+            if attempt == max_retries:
+                log.error("Max retries reached, aborting ETL.")
+                return
+            backoff = min_interval * (2 ** (attempt - 1))
+            log.info(f"Retrying after {backoff:.2f}s...")
+            time.sleep(backoff)
 
     engine = create_engine(os.getenv("DATABASE_URL"))
     Session = sessionmaker(bind=engine)

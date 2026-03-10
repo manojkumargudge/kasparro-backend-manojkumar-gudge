@@ -1,3 +1,98 @@
+# --------------------------------------------------
+# ETL Run Comparison & Anomaly Detection Endpoints
+# --------------------------------------------------
+from fastapi import Response
+
+@app.get("/runs")
+def get_runs(limit: int = 10):
+    with SessionLocal() as s:
+        checkpoints = s.query(Checkpoint).order_by(Checkpoint.last_run.desc()).limit(limit).all()
+        runs = []
+        for cp in checkpoints:
+            try:
+                meta = _json.loads(cp.last_value or '{}')
+                run_meta = meta.get("run_meta", {})
+                runs.append({
+                    "source": cp.source,
+                    "last_run": cp.last_run,
+                    "linked": run_meta.get("linked", 0),
+                    "errors": run_meta.get("errors", 0),
+                    "fail_injected": run_meta.get("fail_injected", False),
+                    "resume": run_meta.get("resume", False),
+                })
+            except Exception:
+                runs.append({"source": cp.source, "last_run": cp.last_run, "meta": cp.last_value})
+        return {"runs": runs}
+
+@app.get("/compare-runs")
+def compare_runs():
+    with SessionLocal() as s:
+        checkpoints = s.query(Checkpoint).order_by(Checkpoint.last_run.desc()).all()
+        anomalies = []
+        prev_linked = None
+        for cp in checkpoints:
+            try:
+                meta = _json.loads(cp.last_value or '{}')
+                run_meta = meta.get("run_meta", {})
+                linked = run_meta.get("linked", 0)
+                errors = run_meta.get("errors", 0)
+                fail_injected = run_meta.get("fail_injected", False)
+                if prev_linked is not None and abs(linked - prev_linked) > 10:
+                    anomalies.append({
+                        "source": cp.source,
+                        "last_run": cp.last_run,
+                        "linked": linked,
+                        "prev_linked": prev_linked,
+                        "anomaly": f"Linked count changed by {linked - prev_linked}"
+                    })
+                if errors > 0:
+                    anomalies.append({
+                        "source": cp.source,
+                        "last_run": cp.last_run,
+                        "errors": errors,
+                        "anomaly": "Errors detected"
+                    })
+                if fail_injected:
+                    anomalies.append({
+                        "source": cp.source,
+                        "last_run": cp.last_run,
+                        "anomaly": "Failure injected during ETL"
+                    })
+                prev_linked = linked
+            except Exception:
+                continue
+        return {"anomalies": anomalies}
+from fastapi.responses import PlainTextResponse
+from sqlalchemy import func
+
+import json as _json
+# --------------------------------------------------
+# Metrics endpoint (Prometheus format)
+# --------------------------------------------------
+@app.get("/metrics", response_class=PlainTextResponse)
+def metrics():
+    with SessionLocal() as s:
+        total_coins = s.query(func.count(Coin.id)).scalar() or 0
+        total_market_cap = s.query(func.sum(Coin.market_cap)).scalar() or 0
+        # ETL run metadata from checkpoints
+        checkpoints = s.query(Checkpoint).all()
+        etl_runs = []
+        for cp in checkpoints:
+            try:
+                meta = _json.loads(cp.last_value or '{}')
+                run_meta = meta.get("run_meta", {})
+                etl_runs.append(run_meta)
+            except Exception:
+                pass
+        lines = [
+            f"coins_total {total_coins}",
+            f"coins_market_cap_total {total_market_cap}",
+            f"etl_runs_count {len(etl_runs)}",
+        ]
+        for idx, run in enumerate(etl_runs):
+            lines.append(f"etl_run_linked{{run="{idx}"}} {run.get('linked', 0)}")
+            lines.append(f"etl_run_errors{{run="{idx}"}} {run.get('errors', 0)}")
+        return "\n".join(lines)
 from fastapi import FastAPI, HTTPException, Query
 import asyncio
 import os

@@ -13,14 +13,34 @@ URL = "https://api.coinpaprika.com/v1/tickers"
 
 def ingest_coins():
     log.info("Starting CoinPaprika ingestion")
-    try:
-        response = requests.get(URL, timeout=10)
-        response.raise_for_status()
-        log.info("CoinPaprika API success")
-        data = response.json()
-    except Exception as e:
-        log.error(f"CoinPaprika API failed: {e}")
-        return
+
+    # Rate limiting and exponential backoff
+    max_retries = int(os.getenv("COINPAPRIKA_MAX_RETRIES", "5"))
+    min_interval = float(os.getenv("COINPAPRIKA_MIN_INTERVAL", "1.0"))  # seconds
+    last_call_time = getattr(ingest_coins, "_last_call_time", None)
+    import time
+    if last_call_time:
+        elapsed = time.time() - last_call_time
+        if elapsed < min_interval:
+            log.info(f"Rate limiting: sleeping {min_interval - elapsed:.2f}s before API call")
+            time.sleep(min_interval - elapsed)
+    ingest_coins._last_call_time = time.time()
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.get(URL, timeout=10)
+            response.raise_for_status()
+            log.info(f"CoinPaprika API success (attempt {attempt})")
+            data = response.json()
+            break
+        except Exception as e:
+            log.error(f"CoinPaprika API failed (attempt {attempt}): {e}")
+            if attempt == max_retries:
+                log.error("Max retries reached, aborting ETL.")
+                return
+            backoff = min_interval * (2 ** (attempt - 1))
+            log.info(f"Retrying after {backoff:.2f}s...")
+            time.sleep(backoff)
 
     engine = create_engine(os.getenv("DATABASE_URL"))
     Session = sessionmaker(bind=engine)
