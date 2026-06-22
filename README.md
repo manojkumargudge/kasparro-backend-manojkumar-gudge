@@ -76,3 +76,29 @@ PostgreSQL (Docker)
 
 ```bash
 docker compose up --build
+```
+
+## Cloud Deployment (optional)
+
+This repository includes scaffolding to deploy to Fly.io and run scheduled ETL jobs via GitHub Actions.
+
+High level steps to enable cloud deployment:
+
+1. Create a Fly account (https://fly.io) and install `flyctl` on your machine.
+2. Set repository secrets in GitHub: `FLY_API_TOKEN`, `DATABASE_URL`, `APP_API_KEY`, `COINPAPRIKA_API_KEY`.
+3. Push to `main` — the `deploy-fly.yml` workflow will deploy to Fly (ensure `fly.toml` `app` name is unique and matches your Fly app).
+4. The `scheduled-etl.yml` workflow runs hourly and executes `scripts/run_etl.py` using the repository secrets; view run logs under Actions → Scheduled ETL.
+
+If you prefer to deploy manually with `flyctl`:
+
+```bash
+fly auth login
+fly apps create <your-app-name>
+fly postgres create --name <your-db-name>
+fly postgres attach --app <your-app-name> <your-db-name>
+fly secrets set APP_API_KEY=yourkey COINPAPRIKA_API_KEY=yourkey
+fly deploy
+```
+
+See `.github/workflows` for CI, deploy, and scheduled ETL workflow definitions.
+

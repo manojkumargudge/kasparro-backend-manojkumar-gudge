@@ -2,14 +2,15 @@ import csv
 import os
 import datetime
 import json as _json
+import hashlib
 from sqlalchemy import create_engine, select, update
 from sqlalchemy.orm import sessionmaker
-from core.models import Coin, Checkpoint, get_or_create_coin, link_source
+from core.models import Coin, RawCoin, Checkpoint, get_or_create_coin, link_source
 from core.logger import get_logger
 
 log = get_logger(__name__)
 
-CSV_FILE = "data/coins.csv"   # keep your existing path if different
+DEFAULT_CSV_FILE = "data/coins.csv"
 
 def ingest_csv():
     log.info("Starting CSV ingestion")
@@ -32,10 +33,20 @@ def ingest_csv():
                 processed_ids = set()
 
         errors = 0
-        with open(CSV_FILE, newline="", encoding="utf-8") as f:
+        csv_path = os.getenv("CSV_PATH") or DEFAULT_CSV_FILE
+        with open(csv_path, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 try:
+                    raw = _json.dumps(row)
+                    row_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+                    # persist raw payload if not exists
+                    exists_raw = db.query(RawCoin).filter_by(row_hash=row_hash).first()
+                    if not exists_raw:
+                        rc = RawCoin(source="csv", row_hash=row_hash, raw=raw, processed=False)
+                        db.add(rc)
+                        db.commit()
+
                     symbol = (row.get("symbol") or "").strip().upper()
                     name = row.get("name")
                     source_coin_id = row.get("id") or row.get("symbol")
@@ -55,6 +66,11 @@ def ingest_csv():
                         coin_id=coin.id,
                         source="csv",
                         source_coin_id=source_coin_id
+                    )
+
+                    # mark raw payload processed
+                    db.execute(
+                        update(RawCoin).where(RawCoin.row_hash == row_hash).values(processed=True)
                     )
 
                     db.commit()

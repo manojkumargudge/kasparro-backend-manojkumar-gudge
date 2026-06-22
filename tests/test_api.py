@@ -20,11 +20,14 @@ def setup_module(module):
     s.commit()
     s.close()
     global client
+    # set test API key for protected endpoints
+    import os
+    os.environ['APP_API_KEY'] = 'testkey'
     client = TestClient(app)
 
 
 def test_get_data():
-    r = client.get('/data')
+    r = client.get('/data', headers={"X-API-KEY": os.environ.get('APP_API_KEY')})
     assert r.status_code == 200
     body = r.json()
     assert 'request_id' in body
@@ -39,8 +42,14 @@ def test_health():
     assert 'db' in body
 
 def test_stats():
-    r = client.get('/stats')
+    r = client.get('/stats', headers={"X-API-KEY": os.environ.get('APP_API_KEY')})
     assert r.status_code == 200
     body = r.json()
     assert 'total_records' in body
     assert 'price_stats' in body
+
+
+def test_unauthorized():
+    # missing API key -> 401 for protected endpoint
+    r = client.get('/data')
+    assert r.status_code == 401

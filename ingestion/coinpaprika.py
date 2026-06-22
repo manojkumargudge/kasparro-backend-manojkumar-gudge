@@ -5,6 +5,7 @@ import json as _json
 from sqlalchemy import create_engine, select, update
 from sqlalchemy.orm import sessionmaker
 from core.models import Coin, Checkpoint, get_or_create_coin, link_source
+from core.models import RawCoin
 from core.logger import get_logger
 
 log = get_logger(__name__)
@@ -13,6 +14,11 @@ URL = "https://api.coinpaprika.com/v1/tickers"
 
 def ingest_coins():
     log.info("Starting CoinPaprika ingestion")
+
+    api_key = os.getenv("COINPAPRIKA_API_KEY")
+    if not api_key:
+        log.error("COINPAPRIKA_API_KEY not set; aborting CoinPaprika ingestion")
+        return
 
     # Rate limiting and exponential backoff
     max_retries = int(os.getenv("COINPAPRIKA_MAX_RETRIES", "5"))
@@ -28,7 +34,8 @@ def ingest_coins():
 
     for attempt in range(1, max_retries + 1):
         try:
-            response = requests.get(URL, timeout=10)
+            headers = {"X-API-KEY": api_key}
+            response = requests.get(URL, headers=headers, timeout=10)
             response.raise_for_status()
             log.info(f"CoinPaprika API success (attempt {attempt})")
             data = response.json()
@@ -52,6 +59,16 @@ def ingest_coins():
 
         for item in data[:50]:  # limit to 50 coins
             try:
+                # persist raw payload
+                raw = _json.dumps(item)
+                import hashlib
+                row_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+                exists_raw = db.query(RawCoin).filter_by(row_hash=row_hash).first()
+                if not exists_raw:
+                    rc = RawCoin(source="coinpaprika", row_hash=row_hash, raw=raw, processed=False)
+                    db.add(rc)
+                    db.commit()
+
                 symbol = (item.get("symbol") or "").strip().upper()
                 name = item.get("name")
                 source_coin_id = item.get("id")
@@ -76,6 +93,10 @@ def ingest_coins():
                     coin_id=coin.id,
                     source="coinpaprika",
                     source_coin_id=source_coin_id
+                )
+                # mark raw processed
+                db.execute(
+                    update(RawCoin).where(RawCoin.row_hash == row_hash).values(processed=True)
                 )
 
                 db.commit()

@@ -5,7 +5,7 @@ import json as _json
 from sqlalchemy import create_engine, select, update
 from sqlalchemy.orm import sessionmaker
 
-from core.models import Coin, Checkpoint, get_or_create_coin, link_source
+from core.models import Coin, RawCoin, Checkpoint, get_or_create_coin, link_source
 from core.logger import get_logger
 
 log = get_logger(__name__)
@@ -37,7 +37,12 @@ def ingest_coingecko():
 
     for attempt in range(1, max_retries + 1):
         try:
-            response = requests.get(COINGECKO_URL, params=PARAMS, timeout=10)
+            # CoinGecko may not need an API key, but include APP_API_KEY if present
+            headers = {}
+            app_api_key = os.getenv("APP_API_KEY")
+            if app_api_key:
+                headers["X-API-KEY"] = app_api_key
+            response = requests.get(COINGECKO_URL, params=PARAMS, timeout=10, headers=headers)
             response.raise_for_status()
             log.info(f"CoinGecko API success (attempt {attempt})")
             data = response.json()
@@ -61,6 +66,16 @@ def ingest_coingecko():
 
         for item in data:
             try:
+                # persist raw payload
+                raw = _json.dumps(item)
+                import hashlib
+                row_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+                exists_raw = db.query(RawCoin).filter_by(row_hash=row_hash).first()
+                if not exists_raw:
+                    rc = RawCoin(source="coingecko", row_hash=row_hash, raw=raw, processed=False)
+                    db.add(rc)
+                    db.commit()
+
                 symbol = (item.get("symbol") or "").strip().upper()
                 name = item.get("name")
                 source_coin_id = item.get("id")
@@ -84,6 +99,10 @@ def ingest_coingecko():
                     coin_id=coin.id,
                     source="coingecko",
                     source_coin_id=source_coin_id
+                )
+                # mark raw processed
+                db.execute(
+                    update(RawCoin).where(RawCoin.row_hash == row_hash).values(processed=True)
                 )
 
                 db.commit()

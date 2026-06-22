@@ -43,7 +43,7 @@ services:
       - "8000:8000"
     restart: always
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD-SHELL", "curl -H \"X-API-KEY: $${APP_API_KEY}\" -f http://localhost:8000/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

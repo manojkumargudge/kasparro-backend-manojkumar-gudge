@@ -2,14 +2,15 @@ import csv
 import os
 import datetime
 import json as _json
+import hashlib
 from sqlalchemy import create_engine, select, update
 from sqlalchemy.orm import sessionmaker
-from core.models import Coin, Checkpoint, get_or_create_coin, link_source
+from core.models import Coin, RawCoin, Checkpoint, get_or_create_coin, link_source
 from core.logger import get_logger
 
 log = get_logger(__name__)
 
-EXTRA_CSV_FILE = "data/extra_coins.csv"  # update if needed
+DEFAULT_EXTRA_CSV_FILE = "data/extra_coins.csv"
 
 def ingest_extra_csv():
     log.info("Starting Extra CSV ingestion")
@@ -41,7 +42,8 @@ def ingest_extra_csv():
             "fail_injected": False,
             "resume": bool(cp),
         }
-        with open(EXTRA_CSV_FILE, newline="", encoding="utf-8") as f:
+        extra_csv_path = os.getenv("EXTRA_CSV_PATH") or DEFAULT_EXTRA_CSV_FILE
+        with open(extra_csv_path, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             actual_schema = set(reader.fieldnames or [])
             matched = expected_schema & actual_schema
@@ -54,6 +56,15 @@ def ingest_extra_csv():
                 log.info(f"Schema match confidence: {confidence:.2f}. Matched: {matched}")
             for idx, row in enumerate(reader):
                 try:
+                    # persist raw row
+                    raw = _json.dumps(row)
+                    row_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+                    exists_raw = db.query(RawCoin).filter_by(row_hash=row_hash).first()
+                    if not exists_raw:
+                        rc = RawCoin(source="extra_csv", row_hash=row_hash, raw=raw, processed=False)
+                        db.add(rc)
+                        db.commit()
+
                     if failure_inject and fail_after > 0 and idx == fail_after:
                         log.error("Injected ETL failure after %d records", fail_after)
                         run_meta["fail_injected"] = True
@@ -76,6 +87,10 @@ def ingest_extra_csv():
                         coin_id=coin.id,
                         source="extra_csv",
                         source_coin_id=source_coin_id
+                    )
+                    # mark raw payload processed
+                    db.execute(
+                        update(RawCoin).where(RawCoin.row_hash == row_hash).values(processed=True)
                     )
 
                     db.commit()

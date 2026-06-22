@@ -1,10 +1,15 @@
 # --------------------------------------------------
 # ETL Run Comparison & Anomaly Detection Endpoints
 # --------------------------------------------------
-from fastapi import Response
+from fastapi import Response, FastAPI, Header
+
+# create app early so decorators below can bind to it
+app = FastAPI()
 
 @app.get("/runs")
-def get_runs(limit: int = 10):
+def get_runs(limit: int = 10, x_api_key: str | None = Header(None)):
+    from core.auth import require_api_key
+    require_api_key(x_api_key)
     with SessionLocal() as s:
         checkpoints = s.query(Checkpoint).order_by(Checkpoint.last_run.desc()).limit(limit).all()
         runs = []
@@ -25,7 +30,9 @@ def get_runs(limit: int = 10):
         return {"runs": runs}
 
 @app.get("/compare-runs")
-def compare_runs():
+def compare_runs(x_api_key: str | None = Header(None)):
+    from core.auth import require_api_key
+    require_api_key(x_api_key)
     with SessionLocal() as s:
         checkpoints = s.query(Checkpoint).order_by(Checkpoint.last_run.desc()).all()
         anomalies = []
@@ -90,10 +97,10 @@ def metrics():
             f"etl_runs_count {len(etl_runs)}",
         ]
         for idx, run in enumerate(etl_runs):
-            lines.append(f"etl_run_linked{{run="{idx}"}} {run.get('linked', 0)}")
-            lines.append(f"etl_run_errors{{run="{idx}"}} {run.get('errors', 0)}")
+            lines.append(f'etl_run_linked{{run="{idx}"}} {run.get("linked", 0)}')
+            lines.append(f'etl_run_errors{{run="{idx}"}} {run.get("errors", 0)}')
         return "\n".join(lines)
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends
 import asyncio
 import os
 import time
@@ -103,6 +110,7 @@ from typing import Dict
 from sqlalchemy import text
 from core.db import engine, SessionLocal
 from core.logger import get_logger
+from core.auth import require_api_key
 from core.models import Coin, Checkpoint
 
 from ingestion.coingecko import ingest_coingecko
@@ -111,7 +119,6 @@ from ingestion.coinpaprika import ingest_coins
 
 log = get_logger(__name__)
 
-app = FastAPI()
 
 
 # --------------------------------------------------
@@ -181,7 +188,7 @@ async def health() -> Dict[str, object]:
 # Stats endpoint (FINAL – SCHEMA SAFE)
 # --------------------------------------------------
 @app.get("/stats")
-def stats():
+def stats(api_key: bool = Depends(require_api_key)):
     try:
         with SessionLocal() as s:
             total_records = s.query(Coin).count()
@@ -222,7 +229,10 @@ def get_data(
     max_price: float | None = None,
     sort: str = "price_usd",
     order: str = "desc",
+    , x_api_key: str | None = Header(None)
 ):
+    from core.auth import require_api_key
+    require_api_key(x_api_key)
     request_id = str(uuid.uuid4())
     start_time = time.time()
 
@@ -287,3 +297,29 @@ def get_data(
             "total_records": total,
         },
     }
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+def metrics(api_key: bool = Depends(require_api_key)):
+    with SessionLocal() as s:
+        total_coins = s.query(func.count(Coin.id)).scalar() or 0
+        total_market_cap = s.query(func.sum(Coin.market_cap)).scalar() or 0
+        # ETL run metadata from checkpoints
+        checkpoints = s.query(Checkpoint).all()
+        etl_runs = []
+        for cp in checkpoints:
+            try:
+                meta = _json.loads(cp.last_value or '{}')
+                run_meta = meta.get("run_meta", {})
+                etl_runs.append(run_meta)
+            except Exception:
+                pass
+        lines = [
+            f"coins_total {total_coins}",
+            f"coins_market_cap_total {total_market_cap}",
+            f"etl_runs_count {len(etl_runs)}",
+        ]
+        for idx, run in enumerate(etl_runs):
+            lines.append(f"etl_run_linked{{run=\"{idx}\"}} {run.get('linked', 0)}")
+            lines.append(f"etl_run_errors{{run=\"{idx}\"}} {run.get('errors', 0)}")
+        return "\n".join(lines)

@@ -1,0 +1,11 @@
+app = "kasparro-backend-manojkumar-gudge"
+primary_region = "iad"
+
+[build]
+  image = "kasparro-backend-manojkumar-gudge:latest"
+
+[env]
+  # Set default env vars here or configure via fly secrets
+  DATABASE_URL = ""
+  APP_API_KEY = ""
+  COINPAPRIKA_API_KEY = ""
