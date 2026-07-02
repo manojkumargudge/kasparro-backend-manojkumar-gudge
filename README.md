@@ -78,6 +78,43 @@ PostgreSQL (Docker)
 docker compose up --build
 ```
 
+## Evaluator Quickstart
+
+Use this sequence to verify the project end to end:
+
+1. Run tests locally:
+
+```bash
+docker compose run --rm api pytest -q
+```
+
+2. Start the stack:
+
+```bash
+docker compose up --build
+```
+
+3. Smoke test the API:
+
+```bash
+curl http://localhost:8000/health
+curl -H "X-API-KEY: <APP_API_KEY>" http://localhost:8000/data
+curl -H "X-API-KEY: <APP_API_KEY>" http://localhost:8000/stats
+```
+
+Or run the reusable smoke test script:
+
+```bash
+APP_API_KEY=<APP_API_KEY> python scripts/smoke_test.py --base-url http://localhost:8000
+```
+
+4. Check scheduled ETL logs:
+
+- GitHub Actions: Actions -> Scheduled ETL
+- Container logs: review the `ingestion.*` and `main` logs for completed runs
+
+Expected result: tests pass, `/health` returns `{"status":"ok",...}`, and protected endpoints return `200` when the API key is valid.
+
 ## Cloud Deployment (optional)
 
 This repository includes scaffolding to deploy to Fly.io and run scheduled ETL jobs via GitHub Actions.

@@ -52,6 +52,7 @@ def ingest_coins():
     engine = create_engine(os.getenv("DATABASE_URL"))
     Session = sessionmaker(bind=engine)
     db = Session()
+    started_at = datetime.datetime.utcnow()
 
     try:
         linked = 0
@@ -108,9 +109,19 @@ def ingest_coins():
 
         log.info(f"CoinPaprika ingestion: {linked} records linked, {errors} errors.")
 
+        run_meta = {
+            "start_time": started_at.isoformat(),
+            "end_time": datetime.datetime.utcnow().isoformat(),
+            "duration_seconds": round((datetime.datetime.utcnow() - started_at).total_seconds(), 3),
+            "linked": linked,
+            "errors": errors,
+            "status": "success" if errors == 0 else "partial",
+        }
         meta = _json.dumps({
             "source_count": len(data),
-            "linked": linked
+            "linked": linked,
+            "errors": errors,
+            "run_meta": run_meta,
         })
 
         cp = db.execute(
@@ -131,10 +142,12 @@ def ingest_coins():
 
         db.commit()
         log.info(f"CoinPaprika ingestion complete ({linked} records linked)")
+        return linked, errors
 
     except Exception as e:
         db.rollback()
         log.error(f"DB operation failed: {e}")
+        return 0, 1
 
     finally:
         db.close()
