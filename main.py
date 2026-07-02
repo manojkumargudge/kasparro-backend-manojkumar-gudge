@@ -1,10 +1,12 @@
 # --------------------------------------------------
 # ETL Run Comparison & Anomaly Detection Endpoints
 # --------------------------------------------------
+from contextlib import asynccontextmanager, suppress
 from fastapi import Response, FastAPI, Header
 
 # create app early so decorators below can bind to it
 app = FastAPI()
+
 
 @app.get("/runs")
 def get_runs(limit: int = 10, x_api_key: str | None = Header(None)):
@@ -100,6 +102,100 @@ def metrics():
             lines.append(f'etl_run_linked{{run="{idx}"}} {run.get("linked", 0)}')
             lines.append(f'etl_run_errors{{run="{idx}"}} {run.get("errors", 0)}')
         return "\n".join(lines)
+
+
+def _parse_checkpoint_run_meta(checkpoint) -> tuple[dict, dict]:
+    try:
+        meta = _json.loads(checkpoint.last_value or "{}")
+    except Exception:
+        meta = {}
+
+    run_meta = meta.get("run_meta") if isinstance(meta, dict) else {}
+    if not isinstance(run_meta, dict):
+        run_meta = {}
+
+    return meta if isinstance(meta, dict) else {}, run_meta
+
+
+def _etl_summary() -> dict:
+    with SessionLocal() as s:
+        checkpoints = s.query(Checkpoint).order_by(Checkpoint.last_run.desc()).all()
+        sources = []
+        total_records = 0
+        total_errors = 0
+        success_runs = []
+        failure_runs = []
+        latest_run = None
+        latest_status = None
+        latest_source = None
+
+        for checkpoint in checkpoints:
+            meta, run_meta = _parse_checkpoint_run_meta(checkpoint)
+            linked = int(run_meta.get("linked") or meta.get("linked") or 0)
+            errors = int(run_meta.get("errors") or meta.get("errors") or 0)
+            status = run_meta.get("status") or ("partial" if errors else "success")
+            duration_seconds = run_meta.get("duration_seconds")
+
+            sources.append(
+                {
+                    "source": checkpoint.source,
+                    "last_run": checkpoint.last_run,
+                    "status": status,
+                    "linked": linked,
+                    "errors": errors,
+                    "duration_seconds": duration_seconds,
+                    "run_meta": run_meta,
+                }
+            )
+
+            total_records += linked
+            total_errors += errors
+
+            if checkpoint.last_run and (latest_run is None or checkpoint.last_run > latest_run):
+                latest_run = checkpoint.last_run
+                latest_status = status
+                latest_source = checkpoint.source
+
+            if status == "success":
+                success_runs.append(checkpoint.last_run)
+            if errors > 0 or status in {"partial", "failed"}:
+                failure_runs.append(checkpoint.last_run)
+
+        return {
+            "records_processed": total_records,
+            "errors_detected": total_errors,
+            "last_success_at": max(success_runs) if success_runs else None,
+            "last_failure_at": max(failure_runs) if failure_runs else None,
+            "latest_run_at": latest_run,
+            "latest_status": latest_status,
+            "latest_source": latest_source,
+            "sources": sources,
+        }
+
+
+def _health_payload(db_ok: bool) -> dict:
+    etl = _etl_summary()
+    status = "ok" if db_ok else "degraded"
+    if etl.get("latest_status") in {"failed", "partial"} and db_ok:
+        status = "degraded"
+    return {
+        "status": status,
+        "db": db_ok,
+        "etl": etl,
+    }
+
+
+def _stats_payload(total_records: int, min_price, max_price, avg_price) -> dict:
+    return {
+        "total_records": total_records,
+        "price_stats": {
+            "min": float(min_price) if min_price is not None else None,
+            "max": float(max_price) if max_price is not None else None,
+            "avg": float(avg_price) if avg_price is not None else None,
+        },
+        "etl": _etl_summary(),
+    }
+
 from fastapi import FastAPI, HTTPException, Query, Depends
 import asyncio
 import os
@@ -155,9 +251,18 @@ async def _background_startup():
         log.error(f"Background ingestion failed: {e}")
 
 
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(_background_startup())
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    startup_task = asyncio.create_task(_background_startup())
+    try:
+        yield
+    finally:
+        startup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await startup_task
+
+
+app.router.lifespan_context = lifespan
 
 
 # --------------------------------------------------
@@ -181,7 +286,7 @@ async def health() -> Dict[str, object]:
     except Exception:
         db_ok = False
 
-    return {"status": "ok", "db": db_ok}
+    return _health_payload(db_ok)
 
 
 # --------------------------------------------------
@@ -203,14 +308,7 @@ def stats(api_key: bool = Depends(require_api_key)):
                 """)
             ).one()
 
-            return {
-                "total_records": total_records,
-                "price_stats": {
-                    "min": float(min_price) if min_price is not None else None,
-                    "max": float(max_price) if max_price is not None else None,
-                    "avg": float(avg_price) if avg_price is not None else None,
-                },
-            }
+            return _stats_payload(total_records, min_price, max_price, avg_price)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -229,7 +327,7 @@ def get_data(
     max_price: float | None = None,
     sort: str = "price_usd",
     order: str = "desc",
-    , x_api_key: str | None = Header(None)
+    x_api_key: str | None = Header(None)
 ):
     from core.auth import require_api_key
     require_api_key(x_api_key)

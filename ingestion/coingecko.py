@@ -59,6 +59,7 @@ def ingest_coingecko():
     engine = create_engine(os.getenv("DATABASE_URL"))
     Session = sessionmaker(bind=engine)
     db = Session()
+    started_at = datetime.datetime.utcnow()
 
     try:
         linked = 0
@@ -114,9 +115,19 @@ def ingest_coingecko():
 
         log.info(f"CoinGecko ingestion: {linked} records linked, {errors} errors.")
 
+        run_meta = {
+            "start_time": started_at.isoformat(),
+            "end_time": datetime.datetime.utcnow().isoformat(),
+            "duration_seconds": round((datetime.datetime.utcnow() - started_at).total_seconds(), 3),
+            "linked": linked,
+            "errors": errors,
+            "status": "success" if errors == 0 else "partial",
+        }
         meta = _json.dumps({
             "source_count": len(data),
-            "linked": linked
+            "linked": linked,
+            "errors": errors,
+            "run_meta": run_meta,
         })
 
         cp = db.execute(
@@ -137,13 +148,19 @@ def ingest_coingecko():
 
         db.commit()
         log.info(f"CoinGecko ingestion complete ({linked} records linked)")
+        return linked, errors
 
     except Exception as e:
         db.rollback()
         log.error(f"DB operation failed: {e}")
+        return 0, 1
 
     finally:
         db.close()
+
+
+if __name__ == "__main__":
+    ingest_coingecko()
 
 
 if __name__ == "__main__":

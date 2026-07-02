@@ -1,10 +1,11 @@
 import os
 import tempfile
+import json
 from fastapi.testclient import TestClient
 
 from core.db import engine, Base, SessionLocal
 from main import app
-from core.models import Coin
+from core.models import Coin, Checkpoint
 
 # Create TestClient after DB tables are created to avoid startup tasks
 client = None
@@ -17,6 +18,25 @@ def setup_module(module):
     # insert one coin
     s = SessionLocal()
     s.add(Coin(symbol='FOO', name='Foo Coin', price_usd=1.23, market_cap=1000))
+    s.add(
+        Checkpoint(
+            source='csv',
+            last_value=json.dumps(
+                {
+                    'linked': 1,
+                    'errors': 0,
+                    'run_meta': {
+                        'start_time': '2026-07-01T00:00:00',
+                        'end_time': '2026-07-01T00:00:01',
+                        'duration_seconds': 1.0,
+                        'linked': 1,
+                        'errors': 0,
+                        'status': 'success',
+                    },
+                }
+            ),
+        )
+    )
     s.commit()
     s.close()
     global client
@@ -40,6 +60,9 @@ def test_health():
     body = r.json()
     assert body['status'] == 'ok'
     assert 'db' in body
+    assert 'etl' in body
+    assert body['etl']['records_processed'] >= 1
+    assert body['etl']['last_success_at'] is not None
 
 def test_stats():
     r = client.get('/stats', headers={"X-API-KEY": os.environ.get('APP_API_KEY')})
@@ -47,6 +70,8 @@ def test_stats():
     body = r.json()
     assert 'total_records' in body
     assert 'price_stats' in body
+    assert 'etl' in body
+    assert body['etl']['records_processed'] >= 1
 
 
 def test_unauthorized():

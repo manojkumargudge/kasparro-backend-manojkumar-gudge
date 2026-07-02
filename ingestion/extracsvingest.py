@@ -12,6 +12,25 @@ log = get_logger(__name__)
 
 DEFAULT_EXTRA_CSV_FILE = "data/extra_coins.csv"
 
+
+def _to_float(value):
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _resolve_extra_csv_path() -> str:
+    extra_csv_path = os.getenv("EXTRA_CSV_PATH")
+    if extra_csv_path:
+        return extra_csv_path
+
+    for candidate in (DEFAULT_EXTRA_CSV_FILE, "data/extra_coins.csv.csv"):
+        if os.path.exists(candidate):
+            return candidate
+
+    return DEFAULT_EXTRA_CSV_FILE
+
 def ingest_extra_csv():
     log.info("Starting Extra CSV ingestion")
     engine = create_engine(os.getenv("DATABASE_URL"))
@@ -42,7 +61,7 @@ def ingest_extra_csv():
             "fail_injected": False,
             "resume": bool(cp),
         }
-        extra_csv_path = os.getenv("EXTRA_CSV_PATH") or DEFAULT_EXTRA_CSV_FILE
+        extra_csv_path = _resolve_extra_csv_path()
         with open(extra_csv_path, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             actual_schema = set(reader.fieldnames or [])
@@ -88,6 +107,8 @@ def ingest_extra_csv():
                         source="extra_csv",
                         source_coin_id=source_coin_id
                     )
+                    coin.price_usd = _to_float(row.get("price_usd"))
+                    coin.market_cap = _to_float(row.get("market_cap"))
                     # mark raw payload processed
                     db.execute(
                         update(RawCoin).where(RawCoin.row_hash == row_hash).values(processed=True)
