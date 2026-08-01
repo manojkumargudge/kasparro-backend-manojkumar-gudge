@@ -42,7 +42,11 @@ def run():
         total_errors += errors or 0
 
         try:
-            linked, errors = ingest_coins()
+            if os.getenv("COINPAPRIKA_API_KEY"):
+                linked, errors = ingest_coins()
+            else:
+                log.warning("COINPAPRIKA_API_KEY not set; skipping CoinPaprika ingestion")
+                linked, errors = 0, 0
         except Exception as ex:
             log.error(f"CoinPaprika ingestion raised exception: {ex}")
             linked, errors = 0, 1
