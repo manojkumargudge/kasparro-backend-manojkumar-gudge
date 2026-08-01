@@ -30,6 +30,11 @@ jobs:
           python-version: '3.11'
       - name: Install deps
         run: pip install -r requirements.txt
+      - name: Initialize database schema
+        env:
+          # Use same DATABASE_URL as the ETL step so init_db creates tables in correct DB
+          DATABASE_URL: ******127.0.0.1:5432/postgres
+        run: python scripts/init_db.py
       - name: Run ETL
         env:
           # Use local Postgres service for workflow runs so host resolution works.
