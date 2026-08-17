@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: kasparro
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -37,10 +37,12 @@ services:
         condition: service_healthy
       init-db:
         condition: service_completed_successfully
+    environment:
+      APP_API_KEY: ${APP_API_KEY:-testkey}
     env_file:
       - .env
     ports:
-      - "8000:8000"
+      - "8001:8000"
     restart: always
     healthcheck:
       test: ["CMD", "python", "-c", "import os, urllib.request; req=urllib.request.Request('http://localhost:8000/health', headers={'X-API-KEY': os.environ['APP_API_KEY']}); urllib.request.urlopen(req, timeout=5).read()"]

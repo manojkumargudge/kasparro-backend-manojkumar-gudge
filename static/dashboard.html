@@ -103,7 +103,7 @@
       </div>
 
       <div class="controls" id="authControls">
-        <input id="apiKey" type="password" placeholder="Enter API key" aria-label="API key" />
+        <input id="apiKey" type="password" placeholder="Enter APP_API_KEY (example: testkey)" aria-label="API key" />
         <button id="loadBtn">Load dashboard</button>
       </div>
 
@@ -283,6 +283,9 @@
 
         if (!res.ok) {
           const text = await res.text();
+          if (res.status === 401) {
+            throw new Error('Unauthorized: use APP_API_KEY (not CoinGecko API key or URL).');
+          }
           throw new Error(text || `Request failed: ${res.status}`);
         }
 
