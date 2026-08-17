@@ -2,6 +2,10 @@ from sqlalchemy import Column, Integer, String, Float, Boolean, Text, DateTime, 
 from sqlalchemy.sql import func
 from core.db import Base
 import uuid
+import logging
+
+
+log = logging.getLogger(__name__)
 
 
 # -----------------------------
@@ -75,17 +79,37 @@ class PriceSnapshot(Base):
 
 def get_or_create_coin(db, symbol: str, name: str):
     """
-    Returns canonical coin for a symbol.
+    Returns canonical coin for a (symbol, name) pair.
     Creates one if not exists.
     """
-    coin = db.query(Coin).filter(Coin.symbol == symbol).first()
+    normalized_symbol = (symbol or "").strip().upper()
+    normalized_name = (name or "").strip()
+
+    coin = db.query(Coin).filter(
+        func.lower(Coin.symbol) == normalized_symbol.lower(),
+        func.lower(Coin.name) == normalized_name.lower(),
+    ).first()
+
     if coin:
         return coin
 
+    # Symbol collisions across sources are common; keep separate canonical rows by name.
+    symbol_collisions = db.query(Coin).filter(
+        func.lower(Coin.symbol) == normalized_symbol.lower()
+    ).all()
+    if symbol_collisions:
+        existing_names = sorted({(c.name or "").strip() for c in symbol_collisions})
+        log.warning(
+            "Ticker collision for symbol '%s': existing names=%s, incoming name='%s'",
+            normalized_symbol,
+            existing_names,
+            normalized_name,
+        )
+
     coin = Coin(
         canonical_id=str(uuid.uuid4()),
-        symbol=symbol,
-        name=name
+        symbol=normalized_symbol,
+        name=normalized_name,
     )
     db.add(coin)
     db.commit()

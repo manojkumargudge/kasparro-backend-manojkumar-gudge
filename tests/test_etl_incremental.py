@@ -5,7 +5,7 @@ import pytest
 from core.db import engine, Base, SessionLocal
 from ingestion.csvingest import ingest_csv
 from ingestion.extracsvingest import ingest_extra_csv
-from core.models import Coin, Checkpoint, CoinSourceMapping, PriceSnapshot
+from core.models import Coin, Checkpoint, CoinSourceMapping, PriceSnapshot, get_or_create_coin
 
 def setup_module(module):
     Base.metadata.drop_all(bind=engine)
@@ -87,5 +87,19 @@ def test_repeat_csv_ingestion_is_idempotent(tmp_path):
         coin = s.query(Coin).filter_by(symbol='DUP').first()
         assert coin is not None
         assert s.query(PriceSnapshot).filter_by(coin_id=coin.id).count() >= 1
+    finally:
+        s.close()
+
+
+def test_symbol_collision_does_not_merge_unrelated_names():
+    s = SessionLocal()
+    try:
+        first = get_or_create_coin(s, symbol='same', name='Same One')
+        second = get_or_create_coin(s, symbol='same', name='Same Two')
+        repeat_first = get_or_create_coin(s, symbol='SAME', name='same one')
+
+        assert first.id != second.id
+        assert repeat_first.id == first.id
+        assert s.query(Coin).filter_by(symbol='SAME').count() == 2
     finally:
         s.close()
