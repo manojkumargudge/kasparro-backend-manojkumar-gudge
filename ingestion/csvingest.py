@@ -1,97 +1,150 @@
 import csv
-import json
-import hashlib
 import os
-from sqlalchemy import select
-from core.db import SessionLocal
-from core.models import RawCoin, Coin
-from schemas.coin import CoinIn
-from core.models import Checkpoint
-from sqlalchemy import select, update
-import datetime, json as _json
+import datetime
+import json as _json
+import hashlib
+from sqlalchemy import create_engine, select, update
+from sqlalchemy.orm import sessionmaker
+from core.models import Coin, RawCoin, Checkpoint, get_or_create_coin, link_source, record_price_snapshot
+from core.logger import get_logger
+
+log = get_logger(__name__)
+
+DEFAULT_CSV_FILE = "data/coins.csv"
 
 
+def _to_float(value):
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
-def _row_hash(row: dict) -> str:
-    raw = json.dumps(row, sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
+def _resolve_csv_path() -> str:
+    csv_path = os.getenv("CSV_PATH")
+    if csv_path:
+        return csv_path
+
+    for candidate in (DEFAULT_CSV_FILE, "data/sample_coins.csv"):
+        if os.path.exists(candidate):
+            return candidate
+
+    return DEFAULT_CSV_FILE
 
 def ingest_csv():
-    CSV_PATH = os.getenv("CSV_PATH", "data/sample_coins.csv")
-    db = SessionLocal()
+    log.info("Starting CSV ingestion")
+    engine = create_engine(os.getenv("DATABASE_URL"))
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    started_at = datetime.datetime.utcnow()
     try:
-        with open(CSV_PATH, "r", encoding="utf-8-sig", newline="") as f:
-            sample = f.read(4096)
-            f.seek(0)
+        linked = 0
+        processed_ids = set()
+
+        # Load last checkpoint (for idempotency)
+        cp = db.execute(
+            select(Checkpoint).filter_by(source="csv")
+        ).scalar_one_or_none()
+        if cp and cp.last_value:
             try:
-                dialect = csv.Sniffer().sniff(sample)
-                delimiter = dialect.delimiter
+                meta = _json.loads(cp.last_value)
+                processed_ids = set(meta.get("processed_ids", []))
             except Exception:
-                delimiter = ","
+                processed_ids = set()
 
-            try:
-                has_header = csv.Sniffer().has_header(sample)
-            except Exception:
-                has_header = False
-
-            if has_header:
-                reader = csv.DictReader(f, delimiter=delimiter)
-                if reader.fieldnames:
-                    reader.fieldnames = [h.strip().lower() for h in reader.fieldnames]
-            else:
-                expected = ["symbol", "name", "price_usd", "market_cap"]
-                reader = csv.DictReader(f, fieldnames=expected, delimiter=delimiter)
-
-            row_count = 0
-            new_raw = 0
-            new_norm = 0
+        errors = 0
+        csv_path = _resolve_csv_path()
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
             for row in reader:
-                row_count += 1
-                # clean row keys and values
-                row = {k.strip().lower(): (v.strip() if isinstance(v, str) else v) for k, v in row.items()}
-                rh = _row_hash(row)
-
-                # insert raw row if not exists (idempotent)
-                exists = db.execute(select(RawCoin).filter_by(row_hash=rh)).scalar_one_or_none()
-                if not exists:
-                    raw = RawCoin(source="csv", row_hash=rh, raw=json.dumps(row, ensure_ascii=False))
-                    db.add(raw)
-                    db.commit()
-                    new_raw += 1
-                else:
-                    # already seen
-                    pass
-
-                # validate and normalize; insert into coins if valid and symbol not exists
                 try:
-                    coin_in = CoinIn(**row)
-                    # avoid duplicate coins by symbol
-                    sym = coin_in.symbol
-                    existing = db.execute(select(Coin).filter_by(symbol=sym)).scalar_one_or_none()
-                    if not existing:
-                        coin = Coin(symbol=coin_in.symbol, name=coin_in.name, price_usd=coin_in.price_usd, market_cap=coin_in.market_cap)
-                        db.add(coin)
+                    raw = _json.dumps(row)
+                    row_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+                    # persist raw payload if not exists
+                    exists_raw = db.query(RawCoin).filter_by(row_hash=row_hash).first()
+                    if not exists_raw:
+                        rc = RawCoin(source="csv", row_hash=row_hash, raw=raw, processed=False)
+                        db.add(rc)
                         db.commit()
-                        new_norm += 1
-                except Exception as e:
-                    # validation failed — keep raw for debugging
-                    print(f"Skipping normalization for row {row_count}: {e}")
 
-            # update checkpoint
-            meta = _json.dumps({"processed_rows": row_count, "new_raw": new_raw, "new_normalized": new_norm})
-            cp = db.execute(select(Checkpoint).filter_by(source="csv")).scalar_one_or_none()
-            if cp:
-                db.execute(update(Checkpoint).where(Checkpoint.id == cp.id).values(last_run=datetime.datetime.utcnow(), last_value=meta))
-            else:
-                db.add(Checkpoint(source="csv", last_value=meta))
-            db.commit()
+                    symbol = (row.get("symbol") or "").strip().upper()
+                    name = row.get("name")
+                    source_coin_id = row.get("id") or row.get("symbol")
 
-            print(f"CSV rows processed={row_count} new_raw={new_raw} new_normalized={new_norm}")
+                    if not symbol or source_coin_id in processed_ids:
+                        continue
+
+                    # 🔹 NORMALIZATION
+                    coin = get_or_create_coin(
+                        db=db,
+                        symbol=symbol,
+                        name=name
+                    )
+
+                    coin.price_usd = _to_float(row.get("price_usd"))
+                    coin.market_cap = _to_float(row.get("market_cap"))
+
+                    link_source(
+                        db=db,
+                        coin_id=coin.id,
+                        source="csv",
+                        source_coin_id=source_coin_id
+                    )
+                    record_price_snapshot(db, coin.id, coin.price_usd, coin.market_cap)
+
+                    # mark raw payload processed
+                    db.execute(
+                        update(RawCoin).where(RawCoin.row_hash == row_hash).values(processed=True)
+                    )
+
+                    db.commit()
+                    linked += 1
+                    processed_ids.add(source_coin_id)
+                except Exception as rec_err:
+                    db.rollback()
+                    log.error(f"Failed to ingest CSV record: {rec_err}")
+                    errors += 1
+        log.info(f"CSV ingestion: {linked} records linked, {errors} errors.")
+
+        run_meta = {
+            "start_time": started_at.isoformat(),
+            "end_time": datetime.datetime.utcnow().isoformat(),
+            "duration_seconds": round((datetime.datetime.utcnow() - started_at).total_seconds(), 3),
+            "linked": linked,
+            "errors": errors,
+            "status": "success" if errors == 0 else "partial",
+        }
+        meta = _json.dumps({
+            "linked": linked,
+            "errors": errors,
+            "processed_ids": list(processed_ids),
+            "run_meta": run_meta,
+        })
+
+        if cp:
+            db.execute(
+                update(Checkpoint)
+                .where(Checkpoint.id == cp.id)
+                .values(
+                    last_run=datetime.datetime.utcnow(),
+                    last_value=meta
+                )
+            )
+        else:
+            db.add(Checkpoint(source="csv", last_value=meta))
+
+        db.commit()
+        log.info(f"CSV ingestion complete ({linked} coins linked)")
+        return linked, errors
+
+    except Exception as e:
+        db.rollback()
+        log.error(f"CSV ingestion failed: {e}")
+        return 0, 1
+
     finally:
         db.close()
 
 
 if __name__ == "__main__":
     ingest_csv()
-

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 
 class CoinIn(BaseModel):
@@ -7,11 +7,13 @@ class CoinIn(BaseModel):
     price_usd: float = 0.0
     market_cap: float = 0.0
 
-    @validator('symbol')
+    @field_validator('symbol')
+    @classmethod
     def symbol_upper(cls, v):
         return v.strip().upper()
 
-    @validator('price_usd', 'market_cap', pre=True)
+    @field_validator('price_usd', 'market_cap', mode='before')
+    @classmethod
     def to_float(cls, v):
         try:
             return float(v or 0)

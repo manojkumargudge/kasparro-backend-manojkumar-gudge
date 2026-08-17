@@ -1,0 +1,41 @@
+name: Scheduled ETL
+
+on:
+  schedule:
+    - cron: '0 * * * *' # hourly
+  workflow_dispatch:
+
+jobs:
+  etl:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run ETL
+        env:
+          # Use local Postgres service for workflow runs so host resolution works.
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+          # Fail the workflow when ingestion reports errors (set to 0 to ignore)
+          FAIL_ON_ERROR: '1'
+          APP_API_KEY: ${{ secrets.APP_API_KEY }}
+          COINPAPRIKA_API_KEY: ${{ secrets.COINPAPRIKA_API_KEY }}
+        run: python scripts/run_etl.py
