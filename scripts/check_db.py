@@ -1,17 +1,26 @@
+"""Print the (password-masked) database URL and try to connect."""
+
 import os
-import traceback
+import sys
+
 from sqlalchemy import create_engine
+from sqlalchemy.engine import make_url
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-print("DATABASE_URL:", repr(DATABASE_URL))
 
-engine = create_engine(DATABASE_URL)
-print("engine.url.host=", engine.url.host)
+def main() -> int:
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        print("DATABASE_URL is not set")
+        return 1
+    print("DATABASE_URL:", make_url(url).render_as_string(hide_password=True))
+    try:
+        with create_engine(url).connect():
+            print("connected to database")
+        return 0
+    except Exception as exc:
+        print("ERROR:", type(exc).__name__, exc)
+        return 1
 
-try:
-    conn = engine.connect()
-    print("connected to database")
-    conn.close()
-except Exception as e:
-    print("ERROR:", repr(e))
-    traceback.print_exc()
+
+if __name__ == "__main__":
+    sys.exit(main())

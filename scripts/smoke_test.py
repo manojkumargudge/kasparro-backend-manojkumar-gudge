@@ -2,13 +2,15 @@ import argparse
 import json
 import os
 import sys
+from typing import Any
 from urllib import error, request
 
 
-def fetch_json(url: str, headers: dict[str, str] | None = None) -> dict:
+def fetch_json(url: str, headers: dict[str, str] | None = None) -> dict[str, Any]:
     req = request.Request(url, headers=headers or {})
     with request.urlopen(req, timeout=10) as response:
-        return json.loads(response.read().decode("utf-8"))
+        body: dict[str, Any] = json.loads(response.read().decode("utf-8"))
+        return body
 
 
 def main() -> int:

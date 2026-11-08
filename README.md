@@ -7,21 +7,22 @@ A FastAPI service that ingests cryptocurrency market data, stores it in PostgreS
 ![PostgreSQL](https://img.shields.io/badge/DB-PostgreSQL%2015-336791)
 ![Docker](https://img.shields.io/badge/container-Docker-2496ED)
 ![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF)
-![Deploy](https://img.shields.io/badge/deploy-Fly.io-8B5CF6)
 
 ---
 
 ## Features
 
 - ETL adapters for **CoinGecko**, **CoinPaprika** and **CSV files**
-- Incremental ETL checkpoints and run metadata
+- Every ingested record validated with Pydantic; invalid rows are logged and counted, not fatal
+- Alembic schema migrations, applied on API startup and before every ETL run
+- Incremental checkpoints for CSV sources and per-run metadata
 - Filterable, paginated data API
 - Statistics, ETL health, run history and run comparison endpoints
 - Prometheus-compatible `/metrics`
 - API key protection and per-client rate limiting
 - Browser-based operational dashboard
 - Docker Compose for local development
-- Pytest suite, GitHub Actions CI, and hourly scheduled ETL
+- Pytest suite against PostgreSQL; GitHub Actions CI (ruff, mypy, pytest + coverage, docker build, `make test`)
 
 ---
 
@@ -74,7 +75,9 @@ flowchart TD
     class BAD bad
 ```
 
-When the API starts, it also launches a background ETL task. This task retries until the database is available.
+Before ingesting, the runner applies Alembic migrations. When the API starts it waits for the database, applies migrations (startup fails if it cannot), then launches the ETL as a background task (disable with `RUN_ETL_ON_STARTUP=0`).
+
+Each record is validated by a per-source Pydantic model (`schemas/coin.py`). Rejected records are logged with the failing fields and counted as `invalid` in the run metadata; the raw payload is still stored in `raw_coins`. Invalid records make a run `partial` but do not fail the ETL; fetch or database errors do (subject to `FAIL_ON_ERROR`).
 
 ---
 
@@ -162,24 +165,25 @@ All non-health routes are rate limited to **30 requests per client per 60 second
 | Testing | Pytest |
 | Containers | Docker, Docker Compose |
 | CI and scheduling | GitHub Actions |
-| Hosting | Fly.io |
+| Migrations | Alembic |
+| Lint / types | Ruff, mypy |
 
 ---
 
 ## Repository layout
 
 ```text
-api/                  API-specific modules
 core/                 Database, models, authentication, logging
 data/                 Sample CSV input files
-ingestion/            CoinGecko, CoinPaprika and CSV adapters
+ingestion/            CoinGecko, CoinPaprika and CSV adapters + shared pipeline
+migrations/           Alembic migrations
+schemas/              Pydantic models for every ingested record
 scripts/              DB init, ETL runner, smoke test, helper commands
 static/               Operational dashboard
 tests/                Automated tests
 main.py               FastAPI entry point
 Dockerfile            API container image
 docker-compose.yml    Local development stack
-fly.toml              Fly.io configuration
 ```
 
 ---
@@ -188,33 +192,25 @@ fly.toml              Fly.io configuration
 
 **Docker workflow:** Docker Desktop with Docker Compose.
 
-**Local Python workflow:** Python 3.11 and a PostgreSQL 15 database (or any SQLAlchemy-compatible database URL).
+**Local Python workflow:** Python 3.11 and a PostgreSQL 15 database.
 
 ---
 
 ## Configuration
 
-Create a `.env` file in the repository root. Never commit real credentials.
-
-```dotenv
-DATABASE_URL=postgresql://postgres:postgres@db:5432/kasparro
-APP_API_KEY=change-me
-COINPAPRIKA_API_KEY=
-COINGECKO_MAX_RETRIES=5
-COINGECKO_MIN_INTERVAL=1.0
-COINPAPRIKA_MAX_RETRIES=5
-COINPAPRIKA_MIN_INTERVAL=1.0
-FAIL_ON_ERROR=1
-```
+Copy `.env.example` to `.env` and fill it in. Never commit `.env` (it is also excluded from Docker images).
 
 | Variable | Purpose |
 |---|---|
-| `DATABASE_URL` | Use host `db` inside Docker Compose. On the host machine use your own host and port, for example `postgresql://postgres:postgres@localhost:5433/kasparro` |
-| `APP_API_KEY` | Required for protected endpoints. Sent in the `X-API-KEY` header |
-| `COINPAPRIKA_API_KEY` | Optional, but CoinPaprika ingestion reports an error without it |
-| `COINGECKO_MAX_RETRIES`, `COINPAPRIKA_MAX_RETRIES` | Retry limits for each source |
-| `COINGECKO_MIN_INTERVAL`, `COINPAPRIKA_MIN_INTERVAL` | Minimum seconds between requests |
-| `FAIL_ON_ERROR` | `1` (default) exits non-zero when ingestion errors occur. `0` allows a successful exit |
+| `DATABASE_URL` | Required. Compose defaults to `postgresql://postgres:postgres@db:5432/kasparro`. From the host use port `5433` |
+| `APP_API_KEY` | Required for protected endpoints. Sent by clients in the `X-API-KEY` header. Never sent upstream |
+| `COINGECKO_API_KEY` | Optional. Sent as `x-cg-demo-api-key`. Without it the keyless public tier is used |
+| `COINPAPRIKA_API_KEY` | Optional. Sent as `Authorization`. The free host does not need it |
+| `COINGECKO_BASE_URL`, `COINPAPRIKA_BASE_URL` | Optional host overrides (e.g. `https://api-pro.coinpaprika.com/v1`) |
+| `COINGECKO_MAX_RETRIES`, `COINPAPRIKA_MAX_RETRIES` | Retry limits for each source (default 5) |
+| `COINGECKO_MIN_INTERVAL`, `COINPAPRIKA_MIN_INTERVAL` | Minimum seconds between requests; also the backoff base (default 1.0) |
+| `FAIL_ON_ERROR` | `1` (default): `run_etl.py` exits non-zero on fetch/database errors. `0` allows a successful exit |
+| `RUN_ETL_ON_STARTUP` | `1` (default): the API runs the ETL in the background after migrating |
 
 ---
 
@@ -223,6 +219,8 @@ FAIL_ON_ERROR=1
 ```bash
 docker compose up --build
 ```
+
+The `api` container applies migrations itself on startup; no separate init step is needed.
 
 ```mermaid
 flowchart LR
@@ -260,8 +258,15 @@ python -m pip install -r requirements.txt
 Set `DATABASE_URL` and `APP_API_KEY`, then:
 
 ```powershell
-python -m scripts.init_db
+python -m pip install -r requirements-dev.txt   # optional: tests, ruff, mypy
+python -m scripts.init_db                        # optional: the API also migrates on startup
 python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Create a new migration after changing `core/models.py`:
+
+```powershell
+alembic revision --autogenerate -m "describe change"
 ```
 
 ---
@@ -276,9 +281,17 @@ python scripts\run_etl.py
 
 ## Testing
 
+Tests run against PostgreSQL (not SQLite). The target database name must end in `_test`; its schema is dropped and rebuilt with Alembic, and it is created if missing.
+
 ```powershell
-docker compose run --rm api pytest -q     # in Docker
-.\scripts\test.ps1                        # helper script
+make test                                   # test image + compose Postgres (kasparro_test)
+.\scripts	est.ps1                          # same, without make
+
+# Local Python against your own Postgres:
+$env:DATABASE_URL = "postgresql://postgres:postgres@localhost:5433/kasparro_test"
+pytest --cov
+ruff check .
+mypy
 ```
 
 Smoke test after starting the API:
@@ -288,39 +301,20 @@ $env:APP_API_KEY = "change-me"
 python scripts\smoke_test.py --base-url http://localhost:8001
 ```
 
-With `TESTING=1`, the test suite uses a file-backed SQLite database, so no running PostgreSQL is needed.
-
 ---
 
-## CI/CD and scheduled ETL
+## CI
 
-```mermaid
-flowchart LR
-    PR[Push or PR to main] --> CI[ci.yml<br/>Python 3.11 + pytest -q]
-    CRON[Hourly schedule<br/>or manual trigger] --> ETLJ[scheduled-etl.yml<br/>run ETL]
-    PUSH[Push to main] --> DEP[Fly.io deploy workflow]
-    DEP --> FLY[Fly.io app]
+`.github/workflows/ci.yml` runs on pushes and pull requests to `main`:
 
-    classDef wf fill:#e8f1ff,stroke:#3b82f6,color:#111
-    class CI,ETLJ,DEP wf
-```
+| Job | What it does |
+|---|---|
+| ruff + mypy | `ruff check .`, `mypy` (config in `pyproject.toml`) |
+| pytest (Postgres) + coverage | Postgres 15 service container; `pytest --cov` (fails under 70%); coverage table in the job summary and `coverage.xml` artifact |
+| docker build | Builds the runtime image |
+| make test | Runs `make test` (compose) end to end |
 
-| Workflow | Trigger | Needs |
-|---|---|---|
-| `ci.yml` | Push and PR to `main` | none |
-| `scheduled-etl.yml` | Hourly, and `workflow_dispatch` | Secrets `APP_API_KEY`, `COINPAPRIKA_API_KEY` |
-| Fly.io deploy | Push to `main` | Secret `FLY_API_TOKEN`; `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` if Docker Hub login is required |
-
----
-
-## Deploy to Fly.io
-
-Set `DATABASE_URL`, `APP_API_KEY` and `COINPAPRIKA_API_KEY` as Fly secrets or environment variables. Check the `app` name and `primary_region` in `fly.toml` first.
-
-```bash
-flyctl auth login
-flyctl deploy --config fly.toml
-```
+Deployment and scheduled ETL are not configured yet.
 
 ---
 
