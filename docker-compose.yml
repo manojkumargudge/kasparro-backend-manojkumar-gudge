@@ -1,7 +1,6 @@
 services:
   db:
     image: postgres:15
-    container_name: kasparro_postgres
     restart: always
     environment:
       POSTGRES_USER: postgres
@@ -23,7 +22,6 @@ services:
     build:
       context: .
       target: runtime
-    container_name: kasparro_api
     depends_on:
       db:
         condition: service_healthy
