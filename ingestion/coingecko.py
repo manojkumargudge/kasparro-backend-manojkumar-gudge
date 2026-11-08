@@ -1,28 +1,19 @@
-"""CoinGecko ``/coins/markets`` ingestion.
+"""CoinGecko ``/coins/markets``.
 
-Auth: if ``COINGECKO_API_KEY`` is set it is sent as ``x-cg-demo-api-key``; otherwise the
-public (keyless) tier is used. The app's own ``APP_API_KEY`` is never sent upstream.
+Auth: ``COINGECKO_API_KEY`` is sent as ``x-cg-demo-api-key`` when set; otherwise the keyless
+public tier is used. The app's own ``APP_API_KEY`` is never sent upstream.
 """
 
-import datetime as dt
-import logging
 import os
+from collections.abc import Iterator
+from typing import Any
 
-from core.db import SessionLocal
-from ingestion.common import FetchError, IngestResult, fetch_json, finish_run, ingest_records
+from core.config import env_int, env_str
+from ingestion import http
+from ingestion.base import Source
 from schemas.coin import CoinGeckoRecord
 
-log = logging.getLogger(__name__)
-
-SOURCE = "coingecko"
 DEFAULT_BASE_URL = "https://api.coingecko.com/api/v3"
-PARAMS = {
-    "vs_currency": "usd",
-    "order": "market_cap_desc",
-    "per_page": 10,
-    "page": 1,
-    "sparkline": "false",
-}
 
 
 def build_headers() -> dict[str, str]:
@@ -34,31 +25,21 @@ def build_headers() -> dict[str, str]:
 
 
 def markets_url() -> str:
-    base = (os.getenv("COINGECKO_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
-    return f"{base}/coins/markets"
+    return env_str("COINGECKO_BASE_URL", DEFAULT_BASE_URL).rstrip("/") + "/coins/markets"
 
 
-def ingest_coingecko() -> IngestResult:
-    log.info("Starting CoinGecko ingestion")
-    result = IngestResult(source=SOURCE)
-    started_at = dt.datetime.now(dt.UTC)
+class CoinGeckoSource(Source):
+    name = "coingecko"
+    model = CoinGeckoRecord
+    incremental = "watermark"
 
-    with SessionLocal() as db:
-        try:
-            data = fetch_json(SOURCE, markets_url(), headers=build_headers(), params=PARAMS)
-        except FetchError as exc:
-            log.error("%s", exc)
-            result.errors += 1
-            return finish_run(db, result, started_at)
-
-        if not isinstance(data, list):
-            log.error("CoinGecko returned %s, expected a list", type(data).__name__)
-            result.errors += 1
-            return finish_run(db, result, started_at)
-
-        ingest_records(db, SOURCE, CoinGeckoRecord, data, result)
-        return finish_run(db, result, started_at)
-
-
-if __name__ == "__main__":
-    ingest_coingecko()
+    def fetch(self) -> Iterator[dict[str, Any]]:
+        per_page = env_int("COINGECKO_PER_PAGE", 50)
+        for page in range(1, env_int("COINGECKO_PAGES", 1) + 1):
+            params = {"vs_currency": "usd", "order": "market_cap_desc", "per_page": per_page, "page": page}
+            data = http.get_json(self.name, markets_url(), headers=build_headers(), params=params)
+            if not isinstance(data, list):
+                raise http.FetchError(f"coingecko: expected a list, got {type(data).__name__}")
+            yield from data
+            if len(data) < per_page:
+                break

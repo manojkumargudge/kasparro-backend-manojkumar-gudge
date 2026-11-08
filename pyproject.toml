@@ -11,12 +11,15 @@ extend-exclude = [".venv", "venv"]
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "UP"]
 
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Header"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["core", "ingestion", "schemas", "scripts", "main", "migrations", "tests"]
 
 [tool.mypy]
 python_version = "3.11"
-files = ["main.py", "core", "ingestion", "schemas", "scripts", "migrations"]
+files = ["main.py", "api", "core", "ingestion", "schemas", "scripts", "services", "migrations"]
 plugins = ["pydantic.mypy"]
 explicit_package_bases = true
 mypy_path = "."
@@ -36,7 +39,7 @@ testpaths = ["tests"]
 addopts = "-ra"
 
 [tool.coverage.run]
-source = ["main", "core", "ingestion", "schemas", "scripts"]
+source = ["main", "api", "core", "ingestion", "schemas", "scripts", "services"]
 branch = true
 
 [tool.coverage.report]

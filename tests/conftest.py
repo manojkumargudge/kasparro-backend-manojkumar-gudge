@@ -6,16 +6,18 @@
 
 import os
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.orm import Session
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 os.environ.setdefault("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/kasparro_test")
-os.environ.setdefault("APP_API_KEY", "testkey")
 os.environ["RUN_ETL_ON_STARTUP"] = "0"
 
 _URL = make_url(os.environ["DATABASE_URL"])
@@ -38,8 +40,35 @@ _ensure_database()
 
 from core.db import SessionLocal, engine  # noqa: E402
 from core.migrations import run_migrations  # noqa: E402
+from ingestion import http  # noqa: E402
 
-TABLES = "price_snapshots, coin_source_mapping, raw_coins, checkpoints, coins"
+TABLES = "price_snapshots, coin_source_mapping, raw_coins, checkpoints, etl_runs, api_rate_limits, coins"
+API_KEY = "testkey"
+
+# core.db calls load_dotenv(), so a developer's .env must not leak into tests.
+_ISOLATED_ENV = (
+    "APP_API_KEYS",
+    "CSV_PATH",
+    "QUIRKY_CSV_PATH",
+    "ETL_SOURCES",
+    "ETL_BATCH_SIZE",
+    "FAIL_AFTER_N",
+    "FAIL_SOURCES",
+    "FAIL_MODE",
+    "FAIL_ON_ERROR",
+    "COINGECKO_API_KEY",
+    "COINPAPRIKA_API_KEY",
+    "COINGECKO_BASE_URL",
+    "COINPAPRIKA_BASE_URL",
+    "COINGECKO_MAX_RETRIES",
+    "COINPAPRIKA_MAX_RETRIES",
+    "COINGECKO_PAGES",
+    "API_RATE_LIMIT",
+    "API_RATE_WINDOW_SECONDS",
+    "DRIFT_WARN_THRESHOLD",
+    "DRIFT_REJECT_THRESHOLD",
+    "ETL_INTERVAL_SECONDS",
+)
 
 
 def reset_schema() -> None:
@@ -57,36 +86,40 @@ def migrated_db() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def clean_tables(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    import main
-
+def clean_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     with engine.begin() as conn:
         conn.execute(text(f"TRUNCATE {TABLES} RESTART IDENTITY CASCADE"))
-    main._CLIENT_BUCKETS.clear()
-    # core.db calls load_dotenv(), so a developer's .env must not leak into tests.
-    for var in (
-        "CSV_PATH",
-        "EXTRA_CSV_PATH",
-        "FAILURE_INJECT",
-        "FAIL_AFTER",
-        "FAIL_ON_ERROR",
-        "COINGECKO_API_KEY",
-        "COINPAPRIKA_API_KEY",
-        "COINGECKO_BASE_URL",
-        "COINPAPRIKA_BASE_URL",
-        "COINGECKO_MAX_RETRIES",
-        "COINPAPRIKA_MAX_RETRIES",
-    ):
+    for var in _ISOLATED_ENV:
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("APP_API_KEY", API_KEY)
     monkeypatch.setenv("COINGECKO_MIN_INTERVAL", "0")
     monkeypatch.setenv("COINPAPRIKA_MIN_INTERVAL", "0")
+    monkeypatch.setattr(http, "sleep", lambda s: None)
+    http.reset_rate_limits()
     yield
 
 
 @pytest.fixture
-def db() -> Iterator:
+def db() -> Iterator[Session]:
     session = SessionLocal()
     try:
         yield session
     finally:
         session.close()
+
+
+@pytest.fixture
+def write_csv(tmp_path: Path) -> Callable[..., Path]:
+    def _write(
+        name: str, rows: list[list[Any]], header: tuple[str, ...] = ("symbol", "name", "price_usd", "market_cap")
+    ) -> Path:
+        import csv
+
+        path = tmp_path / name
+        with path.open("w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(header)
+            w.writerows(rows)
+        return path
+
+    return _write
