@@ -26,7 +26,9 @@ jobs:
           cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
       - name: ruff
-        run: ruff check --output-format=github .
+        run: |
+          ruff check --output-format=github .
+          ruff format --check .
       - name: mypy
         run: mypy
 
@@ -59,7 +61,7 @@ jobs:
           cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
       - name: pytest
-        run: pytest --cov --cov-report=term-missing --cov-report=xml --cov-fail-under=70
+        run: pytest --cov --cov-report=term-missing --cov-report=xml --cov-fail-under=85
       - name: Coverage summary
         if: always()
         run: |

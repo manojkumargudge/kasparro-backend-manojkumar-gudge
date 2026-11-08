@@ -1,19 +1,32 @@
-import logging
-import uuid
-from datetime import datetime
+"""SQLAlchemy models. Schema changes go through Alembic (see migrations/)."""
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
-from sqlalchemy.orm import Mapped, Session, mapped_column
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db import Base
-
-log = logging.getLogger(__name__)
 
 
 # -----------------------------
 # CANONICAL COIN (NORMALIZED)
 # -----------------------------
 class Coin(Base):
+    """One row per real-world asset; identity is (symbol, lower(name))."""
+
     __tablename__ = "coins"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -22,6 +35,11 @@ class Coin(Base):
     name: Mapped[str | None] = mapped_column(String)
     price_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     market_cap: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # observed_at of the observation that set price_usd/market_cap (latest wins)
+    price_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+Index("uq_coins_symbol_lower_name", Coin.symbol, func.lower(Coin.name), unique=True)
 
 
 # --------------------------------
@@ -29,11 +47,12 @@ class Coin(Base):
 # --------------------------------
 class CoinSourceMapping(Base):
     __tablename__ = "coin_source_mapping"
+    __table_args__ = (UniqueConstraint("source", "source_coin_id", name="uq_coin_source_mapping_source_id"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     coin_id: Mapped[int | None] = mapped_column(ForeignKey("coins.id"))
-    source: Mapped[str | None] = mapped_column(String, index=True)  # coingecko / coinpaprika / csv
-    source_coin_id: Mapped[str | None] = mapped_column(String, index=True)  # external ID
+    source: Mapped[str | None] = mapped_column(String, index=True)
+    source_coin_id: Mapped[str | None] = mapped_column(String, index=True)
 
 
 # -----------------------------
@@ -54,6 +73,8 @@ class RawCoin(Base):
 # INGESTION CHECKPOINTS
 # -----------------------------
 class Checkpoint(Base):
+    """Per-source incremental state, committed together with every batch."""
+
     __tablename__ = "checkpoints"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -63,80 +84,56 @@ class Checkpoint(Base):
 
 
 # -----------------------------
-# PRICE HISTORY (SNAPSHOTS)
+# OBSERVATIONS (PRICE HISTORY)
 # -----------------------------
 class PriceSnapshot(Base):
+    """One observation of a coin by a source at ``observed_at``. Upserted idempotently."""
+
     __tablename__ = "price_snapshots"
+    __table_args__ = (
+        UniqueConstraint("source", "coin_id", "observed_at", name="uq_price_snapshots_source_coin_observed"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     coin_id: Mapped[int | None] = mapped_column(ForeignKey("coins.id"), index=True)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     price_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     market_cap: Mapped[float | None] = mapped_column(Float, nullable=True)
-    captured_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), index=True
-    )
+    captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
-# ==========================================================
-# NORMALIZATION HELPERS
-# ==========================================================
+# -----------------------------
+# ETL RUNS (ONE ROW PER RUN PER SOURCE)
+# -----------------------------
+class EtlRun(Base):
+    __tablename__ = "etl_runs"
+    __table_args__ = (Index("ix_etl_runs_source_started_at", "source", "started_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_group: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)  # running|success|partial|failed
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    records_in: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    records_inserted: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    records_updated: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    records_unchanged: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    records_invalid: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    error: Mapped[str | None] = mapped_column(Text)
+    checkpoint: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    drift: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    meta: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
 
-def get_or_create_coin(db: Session, symbol: str, name: str | None) -> Coin:
-    """Return the canonical coin for a (symbol, name) pair, creating it if needed."""
-    normalized_symbol = (symbol or "").strip().upper()
-    normalized_name = (name or "").strip()
+# -----------------------------
+# API RATE LIMIT COUNTERS (FIXED WINDOW, PER API KEY HASH)
+# -----------------------------
+class ApiRateLimit(Base):
+    __tablename__ = "api_rate_limits"
 
-    coin = (
-        db.query(Coin)
-        .filter(
-            func.lower(Coin.symbol) == normalized_symbol.lower(),
-            func.lower(Coin.name) == normalized_name.lower(),
-        )
-        .first()
-    )
-
-    if coin:
-        return coin
-
-    # Symbol collisions across sources are common; keep separate canonical rows by name.
-    symbol_collisions = db.query(Coin).filter(func.lower(Coin.symbol) == normalized_symbol.lower()).all()
-    if symbol_collisions:
-        existing_names = sorted({(c.name or "").strip() for c in symbol_collisions})
-        log.warning(
-            "Ticker collision for symbol '%s': existing names=%s, incoming name='%s'",
-            normalized_symbol,
-            existing_names,
-            normalized_name,
-        )
-
-    coin = Coin(
-        canonical_id=str(uuid.uuid4()),
-        symbol=normalized_symbol,
-        name=normalized_name,
-    )
-    db.add(coin)
-    db.commit()
-    db.refresh(coin)
-    return coin
-
-
-def link_source(db: Session, coin_id: int, source: str, source_coin_id: str) -> None:
-    """Link an external source coin to a canonical coin."""
-    exists = db.query(CoinSourceMapping).filter_by(source=source, source_coin_id=source_coin_id).first()
-
-    if not exists:
-        db.add(CoinSourceMapping(coin_id=coin_id, source=source, source_coin_id=source_coin_id))
-        db.commit()
-
-
-def record_price_snapshot(db: Session, coin_id: int, price_usd: float | None, market_cap: float | None) -> None:
-    """Persist a point-in-time snapshot of a coin's latest pricing."""
-    db.add(
-        PriceSnapshot(
-            coin_id=coin_id,
-            price_usd=float(price_usd) if price_usd is not None else None,
-            market_cap=float(market_cap) if market_cap is not None else None,
-        )
-    )
-    db.commit()
+    key_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, nullable=False)

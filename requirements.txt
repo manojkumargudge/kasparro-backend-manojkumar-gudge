@@ -14,9 +14,11 @@ idna==3.11
 Mako==1.4.3
 MarkupSafe==3.0.4
 psycopg2-binary==2.9.11
+prometheus_client==0.25.0
 pydantic==2.12.5
 pydantic_core==2.41.5
 python-dotenv==1.2.1
+RapidFuzz==3.14.5
 requests==2.32.5
 SQLAlchemy==2.0.45
 starlette==0.50.0

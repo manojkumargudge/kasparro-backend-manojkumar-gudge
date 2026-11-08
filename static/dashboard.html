@@ -199,7 +199,7 @@
 
       function renderSources(sources) {
         if (!Array.isArray(sources) || !sources.length) {
-          els.sourcesTableWrap.innerHTML = '<div class="empty">No ETL checkpoints found yet.</div>';
+          els.sourcesTableWrap.innerHTML = '<div class="empty">No ETL runs recorded yet.</div>';
           return;
         }
 
@@ -210,8 +210,8 @@
             <tr>
               <td>${escapeHtml(s.source || 'unknown')}</td>
               <td><span class="${cls}">${escapeHtml(status)}</span></td>
-              <td>${Number(s.linked || 0).toLocaleString()}</td>
-              <td>${Number(s.errors || 0).toLocaleString()}</td>
+              <td>${Number(s.records_in || 0).toLocaleString()}</td>
+              <td>${Number(s.records_invalid || 0).toLocaleString()}</td>
               <td>${escapeHtml(s.duration_seconds != null ? `${Number(s.duration_seconds).toFixed(1)}s` : '—')}</td>
               <td>${fmtDate(s.last_run)}</td>
             </tr>
@@ -224,8 +224,8 @@
               <tr>
                 <th>Source</th>
                 <th>Status</th>
-                <th>Linked</th>
-                <th>Errors</th>
+                <th>Records in</th>
+                <th>Invalid</th>
                 <th>Duration</th>
                 <th>Last run</th>
               </tr>
@@ -246,8 +246,8 @@
             <td>${escapeHtml(a.source || 'unknown')}</td>
             <td>${fmtDate(a.last_run)}</td>
             <td>${escapeHtml(a.anomaly || '—')}</td>
-            <td>${a.linked != null ? Number(a.linked).toLocaleString() : '—'}</td>
-            <td>${a.errors != null ? Number(a.errors).toLocaleString() : '—'}</td>
+            <td>${escapeHtml(a.metric || '—')}</td>
+            <td>${a.z != null ? Number(a.z).toFixed(1) : '—'}</td>
           </tr>
         `).join('');
 
@@ -258,8 +258,8 @@
                 <th>Source</th>
                 <th>Last run</th>
                 <th>Anomaly</th>
-                <th>Linked</th>
-                <th>Errors</th>
+                <th>Metric</th>
+                <th>z</th>
               </tr>
             </thead>
             <tbody>${rows}</tbody>
@@ -300,7 +300,7 @@
 
           const etl = health?.etl || {};
           const totalRecords = stats?.total_records ?? 0;
-          const totalErrors = etl?.errors_detected ?? 0;
+          const totalErrors = (etl?.sources || []).reduce((n, s) => n + Number(s.records_invalid || 0), 0);
           const latestSource = etl?.latest_source || '—';
           const latestStatus = (etl?.latest_status || 'unknown').toString();
 

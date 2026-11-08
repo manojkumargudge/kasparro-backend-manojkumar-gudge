@@ -1,0 +1,9 @@
+rank,Coin Nm,TICKR,MktCap_USD,Px (USD),lastUpdated,Notes
+1,Bitcoin,btc,"$1,702,000,000,000","$86,120.50",2026-11-01T10:00:00Z,flagship
+2,Ethereum, eth ,3.4e11,"2,815.07",1761991200,
+3,Tether,USDT,1.83E+11,1.0001,2026-11-01 10:00:00,stablecoin
+4,Solana,SOL,N/A,141.9,2026-11-01T10:00:00+00:00,cap not reported
+5,XRP,xrp,"118,000,000,000",-,2026-11-01T10:00:00Z,price missing
+6,Dogecoin,DOGE,"$27,500,000,000",0.18,,no timestamp (uses file time)
+7,Broken Price Coin,BPC,1000,not-a-price,2026-11-01T10:00:00Z,invalid price
+8,,NONAME,1000,1.0,2026-11-01T10:00:00Z,missing name

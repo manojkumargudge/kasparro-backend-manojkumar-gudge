@@ -1,13 +1,12 @@
-"""One-shot ETL runner: migrate the schema, then ingest every source.
+"""One-shot ETL runner (used by `make etl`, the Docker image and the cloud scheduled job).
 
-Exit code is non-zero when any source reports fetch/database errors and
-``FAIL_ON_ERROR`` is truthy (default). Records rejected by validation are logged
-and counted but do not fail the run.
+Applies migrations, then runs every source (``ETL_SOURCES`` narrows the list). Exit code 1
+if any source run failed and ``FAIL_ON_ERROR`` is truthy (default). Records rejected by
+validation make a run ``partial`` but do not fail the process.
 """
 
 import os
 import sys
-from collections.abc import Callable
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
@@ -20,38 +19,19 @@ log = get_logger(__name__)
 
 def run() -> int:
     try:
+        from core.config import env_bool
         from core.migrations import run_migrations
-        from ingestion.coingecko import ingest_coingecko
-        from ingestion.coinpaprika import ingest_coins
-        from ingestion.common import IngestResult
-        from ingestion.csvingest import ingest_csv
+        from services.etl import run_all
 
         run_migrations()
     except Exception:
         log.exception("ETL setup failed (imports or migrations)")
         return 1
 
-    log.info("Starting ETL job")
-    sources: list[tuple[str, Callable[[], IngestResult]]] = [
-        ("coingecko", ingest_coingecko),
-        ("csv", ingest_csv),
-        ("coinpaprika", ingest_coins),
-    ]
-    linked = invalid = errors = 0
-    for name, ingest in sources:
-        try:
-            result = ingest()
-        except Exception:
-            log.exception(f"{name} ingestion raised")
-            errors += 1
-            continue
-        linked += result.linked
-        invalid += result.invalid
-        errors += result.errors
-
-    log.info(f"ETL completed: linked={linked} invalid={invalid} errors={errors}")
-    if errors and os.getenv("FAIL_ON_ERROR", "1").lower() in {"1", "true", "yes"}:
-        log.error("ETL finished with errors and FAIL_ON_ERROR is set")
+    results = run_all()
+    failed = [r.source for r in results if r.status == "failed"]
+    if failed and env_bool("FAIL_ON_ERROR", True):
+        log.error("ETL finished with failed sources: %s", ", ".join(failed))
         return 1
     return 0
 
