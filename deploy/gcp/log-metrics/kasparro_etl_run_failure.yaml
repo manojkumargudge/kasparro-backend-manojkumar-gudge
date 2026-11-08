@@ -1,0 +1,14 @@
+description: Kasparro ETL source runs that failed (fetch/DB errors, schema drift rejection, crashes), by source.
+filter: >-
+  resource.type="cloud_run_job"
+  AND jsonPayload.event="etl_run_finished"
+  AND jsonPayload.status="failed"
+labelExtractors:
+  source: EXTRACT(jsonPayload.source)
+metricDescriptor:
+  metricKind: DELTA
+  valueType: INT64
+  unit: "1"
+  labels:
+    - key: source
+      description: ETL source name

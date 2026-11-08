@@ -1,0 +1,17 @@
+description: Kasparro ETL source runs that finished with status success or partial, by source.
+filter: >-
+  resource.type="cloud_run_job"
+  AND jsonPayload.event="etl_run_finished"
+  AND jsonPayload.status=("success" OR "partial")
+labelExtractors:
+  source: EXTRACT(jsonPayload.source)
+  status: EXTRACT(jsonPayload.status)
+metricDescriptor:
+  metricKind: DELTA
+  valueType: INT64
+  unit: "1"
+  labels:
+    - key: source
+      description: ETL source name
+    - key: status
+      description: success or partial

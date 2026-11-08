@@ -18,13 +18,18 @@ RUN pip install --no-cache-dir -r requirements-dev.txt
 CMD ["pytest", "-q"]
 
 
-# Runtime image (default target). Migrations run on startup.
+# Runtime image (default target). The same image runs the API (default CMD) and the
+# ETL job (`python scripts/run_etl.py`). Migrations run on API startup and before each ETL.
 FROM base AS runtime
 
+LABEL org.opencontainers.image.source="https://github.com/manojkumargudge/kasparro-backend-manojkumar-gudge"
+
+# Cloud Run injects PORT; locally it defaults to 8000.
+ENV PORT=8000
 EXPOSE 8000
 
-# Healthcheck: ping /health without requiring curl in the image
+# /health returns 503 when the database is unreachable (no curl needed in the image).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5).read()"]
+    CMD python -c "import os, urllib.request as u; u.urlopen('http://localhost:%s/health' % os.environ.get('PORT', '8000'), timeout=5)"
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "exec uvicorn main:app --host 0.0.0.0 --port ${PORT} --proxy-headers --forwarded-allow-ips='*'"]
