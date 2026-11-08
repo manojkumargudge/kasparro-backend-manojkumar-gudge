@@ -1,0 +1,19 @@
+description: New observations written per Kasparro ETL source run (distribution), by source.
+filter: >-
+  resource.type="cloud_run_job"
+  AND jsonPayload.event="etl_run_finished"
+valueExtractor: EXTRACT(jsonPayload.records_inserted)
+labelExtractors:
+  source: EXTRACT(jsonPayload.source)
+metricDescriptor:
+  metricKind: DELTA
+  valueType: DISTRIBUTION
+  unit: "1"
+  labels:
+    - key: source
+      description: ETL source name
+bucketOptions:
+  exponentialBuckets:
+    numFiniteBuckets: 16
+    growthFactor: 2
+    scale: 1

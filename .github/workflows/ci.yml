@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   lint:
-    name: ruff + mypy
+    name: ruff + mypy + actionlint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +31,10 @@ jobs:
           ruff format --check .
       - name: mypy
         run: mypy
+      - name: actionlint (workflow files)
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color
+      - name: shellcheck (deploy scripts)
+        run: docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.10.0 /mnt/deploy/gcp/bootstrap.sh
 
   test:
     name: pytest (Postgres) + coverage

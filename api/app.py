@@ -11,6 +11,7 @@ from sqlalchemy.exc import OperationalError
 
 from api.routers import data, health, ops, runs
 from core.config import env_bool, env_int
+from core.logger import configure_logging
 from core.migrations import run_migrations
 from services.etl import run_all
 from services.metrics import HTTP_LATENCY, HTTP_REQUESTS
@@ -60,6 +61,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app() -> FastAPI:
+    configure_logging()  # JSON logs for app + uvicorn (runs after uvicorn's own log setup)
     app = FastAPI(title="Kasparro Backend", version="0.2.0", lifespan=lifespan)
 
     @app.middleware("http")
