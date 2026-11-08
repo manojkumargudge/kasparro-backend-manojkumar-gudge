@@ -1,7 +1,9 @@
 import os
+
 from fastapi import Header, HTTPException
 
-def require_api_key(x_api_key: str | None = Header(None)):
+
+def require_api_key(x_api_key: str | None = Header(None)) -> bool:
     """Dependency to require X-API-KEY header matches env var."""
     app_api_key = os.getenv("APP_API_KEY")
     if not app_api_key:

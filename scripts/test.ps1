@@ -1,5 +1,5 @@
-Write-Host "Running tests inside api service (docker compose run --rm api pytest)"
+Write-Host "Running tests in the test image against compose Postgres"
 
-docker compose run --rm api pytest -q
+docker compose run --rm --build test
 
 Write-Host "Tests finished." 

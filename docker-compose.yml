@@ -18,38 +18,38 @@ services:
       retries: 5
       start_period: 5s
 
-  init-db:
-    build: .
-    container_name: kasparro_init_db
-    depends_on:
-      db:
-        condition: service_healthy
-    command: ["python", "-m", "scripts.init_db"]
-    restart: "no"
-    env_file:
-      - .env
-
+  # The API applies Alembic migrations on startup, then runs the ETL in the background.
   api:
-    build: .
+    build:
+      context: .
+      target: runtime
     container_name: kasparro_api
     depends_on:
       db:
         condition: service_healthy
-      init-db:
-        condition: service_completed_successfully
-    environment:
-      APP_API_KEY: ${APP_API_KEY:-testkey}
     env_file:
-      - .env
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@db:5432/kasparro}
+      APP_API_KEY: ${APP_API_KEY:-testkey}
     ports:
       - "8001:8000"
     restart: always
-    healthcheck:
-      test: ["CMD", "python", "-c", "import os, urllib.request; req=urllib.request.Request('http://localhost:8000/health', headers={'X-API-KEY': os.environ['APP_API_KEY']}); urllib.request.urlopen(req, timeout=5).read()"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+
+  # `make test`: runs pytest against a throwaway kasparro_test database on the db service.
+  test:
+    build:
+      context: .
+      target: test
+    profiles: ["test"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/kasparro_test
+      APP_API_KEY: testkey
+    command: ["pytest", "-q", "--cov", "--cov-report=term"]
 
 volumes:
   postgres_data:

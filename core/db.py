@@ -1,27 +1,30 @@
 import os
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
+from collections.abc import Iterator
+
 from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 load_dotenv()
 
-# During tests we force an in-memory SQLite DB to avoid depending on Postgres
-if os.getenv("TESTING") == "1":
-    DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+pysqlite:///:memory:")
-else:
-    DATABASE_URL = os.getenv("DATABASE_URL")
 
-# If DATABASE_URL is None, create_engine will raise a helpful error
-engine = create_engine(DATABASE_URL, echo=False)
+def get_database_url() -> str:
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        raise RuntimeError("DATABASE_URL is not set")
+    return url
 
-SessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=engine
-)
 
-Base = declarative_base()
-def get_db():
+engine = create_engine(get_database_url(), echo=False, pool_pre_ping=True)
+
+SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+def get_db() -> Iterator[Session]:
     db = SessionLocal()
     try:
         yield db

@@ -1,74 +1,60 @@
-import sys
-import os
-import traceback
+"""One-shot ETL runner: migrate the schema, then ingest every source.
 
-# Add project root to Python path
+Exit code is non-zero when any source reports fetch/database errors and
+``FAIL_ON_ERROR`` is truthy (default). Records rejected by validation are logged
+and counted but do not fail the run.
+"""
+
+import os
+import sys
+from collections.abc import Callable
+
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
-    sys.path.append(PROJECT_ROOT)
+    sys.path.insert(0, PROJECT_ROOT)
 
-from core.logger import get_logger
+from core.logger import get_logger  # noqa: E402
 
 log = get_logger(__name__)
 
 
-def run():
+def run() -> int:
     try:
-        # Import ingestion modules inside run() so import-time errors are caught
+        from core.migrations import run_migrations
         from ingestion.coingecko import ingest_coingecko
-        from ingestion.csvingest import ingest_csv
         from ingestion.coinpaprika import ingest_coins
+        from ingestion.common import IngestResult
+        from ingestion.csvingest import ingest_csv
 
-        log.info("Starting scheduled ETL job")
+        run_migrations()
+    except Exception:
+        log.exception("ETL setup failed (imports or migrations)")
+        return 1
 
-        total_linked = 0
-        total_errors = 0
-
-        # run each ingestion and collect results (linked, errors)
+    log.info("Starting ETL job")
+    sources: list[tuple[str, Callable[[], IngestResult]]] = [
+        ("coingecko", ingest_coingecko),
+        ("csv", ingest_csv),
+        ("coinpaprika", ingest_coins),
+    ]
+    linked = invalid = errors = 0
+    for name, ingest in sources:
         try:
-            linked, errors = ingest_coingecko()
-        except Exception as ex:
-            log.error(f"CoinGecko ingestion raised exception: {ex}")
-            linked, errors = 0, 1
-        total_linked += linked or 0
-        total_errors += errors or 0
+            result = ingest()
+        except Exception:
+            log.exception(f"{name} ingestion raised")
+            errors += 1
+            continue
+        linked += result.linked
+        invalid += result.invalid
+        errors += result.errors
 
-        try:
-            linked, errors = ingest_csv()
-        except Exception as ex:
-            log.error(f"CSV ingestion raised exception: {ex}")
-            linked, errors = 0, 1
-        total_linked += linked or 0
-        total_errors += errors or 0
-
-        try:
-            linked, errors = ingest_coins()
-        except Exception as ex:
-            log.error(f"CoinPaprika ingestion raised exception: {ex}")
-            linked, errors = 0, 1
-        total_linked += linked or 0
-        total_errors += errors or 0
-
-        log.info(f"Scheduled ETL completed: {total_linked} records linked, {total_errors} errors")
-
-        # Decide whether to fail the process based on environment flag
-        fail_on_error = os.getenv("FAIL_ON_ERROR", "1").lower() in ("1", "true", "yes")
-        if total_errors > 0:
-            log.error("ETL finished with errors")
-            if fail_on_error:
-                log.error("FAIL_ON_ERROR is set — failing run")
-                sys.exit(1)
-            else:
-                log.warning("FAIL_ON_ERROR not set — completing with success despite errors")
-        else:
-            log.info("ETL finished successfully")
-    except Exception as e:
-        log.error(f"Scheduled ETL failed: {e}")
-        tb = traceback.format_exc()
-        log.error(tb)
-        # Exit non-zero so CI/cron runners receive a failure signal for real errors
-        sys.exit(1)
+    log.info(f"ETL completed: linked={linked} invalid={invalid} errors={errors}")
+    if errors and os.getenv("FAIL_ON_ERROR", "1").lower() in {"1", "true", "yes"}:
+        log.error("ETL finished with errors and FAIL_ON_ERROR is set")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    run()
+    sys.exit(run())
