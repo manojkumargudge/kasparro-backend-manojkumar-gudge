@@ -27,15 +27,15 @@ curl -s -H "X-API-KEY: <DEMO_KEY>" "<LIVE_URL>/data?limit=5&sort=market_cap"
 |---|---|
 | **Live URL** | `<LIVE_URL>` (public: `/health`, `/docs`, `/dashboard`) |
 | **Reviewer demo key** | `<DEMO_KEY>`: read-only, 20 requests/min, sent as `X-API-KEY` |
-| **Region** | GCP `asia-south1` (Mumbai); Neon Postgres in AWS `ap-south-1` (Mumbai) |
+| **Region** | GCP `asia-south1` (Mumbai); Neon Postgres in AWS `aws-ap-southeast-1` (Singapore). Mumbai isn't available on Neon's free plan, so database round trips cross Mumbai ↔ Singapore |
 | **API** | Cloud Run service `kasparro-api`, `min-instances 0`, `max-instances 2`, `RUN_ETL_ON_STARTUP=false` |
 | **ETL** | Cloud Run job `kasparro-etl`, started hourly by Cloud Scheduler (`0 * * * *` UTC) |
-| **Secrets** | Secret Manager only: `DATABASE_URL`, `APP_API_KEY` (owner), `APP_DEMO_API_KEY` (demo), `COINGECKO_API_KEY`, `COINPAPRIKA_API_KEY` |
+| **Secrets** | Secret Manager only: `DATABASE_URL`, `APP_API_KEY` (owner), `APP_DEMO_API_KEY` (demo), `COINGECKO_API_KEY`; optional `COINPAPRIKA_API_KEY` (without it, the free keyless CoinPaprika API is used) |
 | **Deploy** | `.github/workflows/deploy.yml` through Workload Identity Federation (no JSON keys); fails unless `/health` returns 200 |
 
 ```text
 Cloud Scheduler ──hourly──▶ Cloud Run job (python scripts/run_etl.py) ──┐
-                                                                        ├──▶ Neon Postgres (TLS, sslmode=require)
+                                                                        ├──▶ Neon Postgres, Singapore (TLS, sslmode=require)
 Internet ──HTTPS──▶ Cloud Run service (uvicorn main:app, scales to 0) ──┘
         JSON logs (severity) ──▶ Cloud Logging ──▶ log-based metrics (run success/failure, records)
 ```
@@ -44,7 +44,8 @@ Internet ──HTTPS──▶ Cloud Run service (uvicorn main:app, scales to 0) 
 `min-instances 0`, the first request after an idle period has to wait for:
 - the container to start;
 - the Alembic migration check;
-- a suspended Neon compute to wake.
+- a suspended Neon compute to wake;
+- database round trips between Mumbai and Singapore.
 
 Later requests are warm. Setting `min-instances 1` would remove the cold start, but it is
 not free.

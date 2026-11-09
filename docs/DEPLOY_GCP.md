@@ -1,8 +1,9 @@
 # Deploying to Google Cloud (asia-south1, free tier)
 
 Target: a public API on Cloud Run and an hourly ETL as a Cloud Run job started by Cloud
-Scheduler. Postgres is on Neon (Mumbai). Secrets live only in Secret Manager.
-Region: **`asia-south1` (Mumbai)**.
+Scheduler. Postgres is on Neon in **Singapore** (`aws-ap-southeast-1`); Mumbai is not
+available on Neon's free plan. Secrets live only in Secret Manager.
+GCP region: **`asia-south1` (Mumbai)**.
 
 | Piece | GCP service | Name |
 |---|---|---|
@@ -10,8 +11,8 @@ Region: **`asia-south1` (Mumbai)**.
 | ETL | Cloud Run job, `python scripts/run_etl.py` | `kasparro-etl` |
 | Hourly trigger | Cloud Scheduler `0 * * * *` (HTTP → Run Admin API) | `kasparro-etl-hourly` |
 | Images | Artifact Registry, cleanup policy keeps the 2 newest | `asia-south1-docker.pkg.dev/PROJECT/kasparro/kasparro-backend` |
-| Secrets | Secret Manager (all five required) | `kasparro-database-url`, `kasparro-app-api-key` (owner, 60/min), `kasparro-demo-api-key` (reviewers, read-only, 20/min), `kasparro-coingecko-api-key`, `kasparro-coinpaprika-api-key` |
-| Database | Neon Postgres, AWS ap-south-1 (Mumbai), direct endpoint, `sslmode=require` | — |
+| Secrets | Secret Manager: four required, one optional | `kasparro-database-url`, `kasparro-app-api-key` (owner, 60/min), `kasparro-demo-api-key` (reviewers, read-only, 20/min), `kasparro-coingecko-api-key`; optional `kasparro-coinpaprika-api-key` (bound only if it has a version; otherwise the free keyless CoinPaprika API is used) |
+| Database | Neon Postgres, AWS `aws-ap-southeast-1` (Singapore), direct endpoint, `sslmode=require` | — |
 | Logs / metrics | Cloud Logging + 4 log-based metrics | `kasparro_etl_run_success`, `_failure`, `_records_in`, `_records_inserted` |
 
 ```text
@@ -19,7 +20,7 @@ GitHub (push to main or manual run) ──OIDC──▶ Workload Identity Federa
    build image → Artifact Registry → deploy service + job → upsert scheduler → /health must be 200 → smoke test
 
 Cloud Scheduler ──hourly──▶ Cloud Run job (ETL) ──┐
-                                                  ├──▶ Neon Postgres (Mumbai, TLS)
+                                                  ├──▶ Neon Postgres (Singapore, TLS)
 Internet ──HTTPS──▶ Cloud Run service (API) ──────┘
      both write JSON logs (with severity) ──▶ Cloud Logging ──▶ log-based metrics
 ```
@@ -36,13 +37,13 @@ There are no JSON service-account keys anywhere. The image contains no secrets
 | Cloud Run service | request-based billing, scales to 0 | 2M requests, 180,000 vCPU-s, 360,000 GiB-s | [Cloud Run pricing](https://cloud.google.com/run/pricing) |
 | Cloud Run job | 720 runs × ~1 min (billed at least 1 min each) × 1 vCPU ≈ 43,200 vCPU-s, 21,600 GiB-s | 240,000 vCPU-s, 450,000 GiB-s, **unverified**: seen in Google's pricing page snippets, but cached copies disagree (180k / 200k) and the live page could not be read | [Cloud Run pricing](https://cloud.google.com/run/pricing) |
 | asia-south1 | Tier 1 since Nov 2024; free tier applied at Tier 1 prices | — | [Release notes](https://docs.cloud.google.com/run/docs/release-notes), [Locations](https://docs.cloud.google.com/run/docs/locations) |
-| Network egress | API responses to clients | 1 GB free **in North America only**; Mumbai egress is billed (fractions of a cent at demo volume) | [Cloud Run pricing](https://cloud.google.com/run/pricing) |
+| Network egress | API responses to clients, plus Cloud Run → Neon (Singapore) traffic, which leaves Google's network | 1 GB free **in North America only**; egress from Mumbai is billed (fractions of a cent at demo volume) | [Cloud Run pricing](https://cloud.google.com/run/pricing) |
 | Cloud Scheduler | 1 job | 3 jobs per billing account | [GCP free tier](https://cloud.google.com/free) |
-| Secret Manager | 5 secrets × 1 version; ~4–5k reads/month | 6 active versions, 10,000 access ops | [GCP free tier](https://cloud.google.com/free) |
+| Secret Manager | 4–5 secrets × 1 version; ~4–5k reads/month | 6 active versions, 10,000 access ops | [GCP free tier](https://cloud.google.com/free) |
 | Artifact Registry | ~150–250 MB/image, 2 kept | 0.5 GB storage | [GCP free tier](https://cloud.google.com/free) |
 | Logging | small | 50 GiB/month | [GCP free tier](https://cloud.google.com/free) |
 
-With 5 secrets, only **one** spare version fits in the free 6. When you rotate a secret,
+With 5 secrets, only **one** spare version fits in the free 6 (two with 4). When you rotate a secret,
 **destroy** the old version (`gcloud secrets versions destroy N --secret NAME`).
 
 ## Access model
@@ -74,19 +75,22 @@ created until you run the commands yourself.
 |---|---|---|
 | 1 | Neon project (outside GCP) | Neon free plan |
 | 2 | GCP project, billing link, **budget + alerts** | Budgets are free |
-| 3 `bootstrap.sh` | APIs enabled; Artifact Registry repo + cleanup policy; 3 service accounts; WIF pool/provider; 5 secrets + versions; 4 log-based metrics | AR storage, Secret Manager, Monitoring (all within the free allowance at this size). SAs, WIF and IAM are free |
+| 3 `bootstrap.sh` | APIs enabled; Artifact Registry repo + cleanup policy; 3 service accounts; WIF pool/provider; 4–5 secrets + versions; 4 log-based metrics | AR storage, Secret Manager, Monitoring (all within the free allowance at this size). SAs, WIF and IAM are free |
 | 5 deploy workflow | Cloud Run service, Cloud Run job, Cloud Scheduler job; one job execution | Cloud Run, Scheduler (within the free allowance) |
 
 ---
 
-## 1. Neon (Mumbai)
+## 1. Neon (Singapore)
 
-1. In the Neon console, create a project in **AWS Asia Pacific (Mumbai) `aws-ap-south-1`**.
+1. In the Neon console, create a project in **AWS Asia Pacific (Singapore) `aws-ap-southeast-1`**.
+   Mumbai (`aws-ap-south-1`) is not available on Neon's free plan; Singapore is the closest
+   free region to `asia-south1`. Every database round trip crosses Mumbai ↔ Singapore,
+   which adds latency to cold starts and queries (see the measured numbers in the README).
 2. Under *Connection details*, turn **Connection pooling OFF** and copy the **direct** string.
    The host must not contain `-pooler`:
 
    ```text
-   postgresql://USER:PASSWORD@ep-xxxx-xxxx.ap-south-1.aws.neon.tech/neondb?sslmode=require
+   postgresql://USER:PASSWORD@ep-xxxx-xxxx.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
    ```
 
    The ETL uses session-level advisory locks, and Neon's pooled (PgBouncer transaction mode)
@@ -184,6 +188,13 @@ Run the 6 `gh variable set …` lines that `bootstrap.sh` prints, or add them un
 *Settings → Secrets and variables → Actions → Variables*. They are not secret. Optionally
 also set `COINPAPRIKA_BASE_URL` (see step 3).
 
+When pasting values in the GitHub UI, paste **only** the value: no leading spaces, no
+newline, and not the table header (`Variable name … Value`). Check with:
+
+```bash
+gh variable list --json name,value --jq '.[]|"\(.name)=\(.value|@json)"'
+```
+
 ## 5. Deploy
 
 ```bash
@@ -193,14 +204,16 @@ gh run watch
 
 The deploy job does the following, and fails if anything goes wrong:
 
-1. Checks that all five secrets have a version.
-2. Builds and pushes the image.
-3. Deploys the service with `RUN_ETL_ON_STARTUP=false`, so the ETL runs only from the job.
-4. Deploys the job.
-5. Upserts the hourly scheduler.
-6. Requires **`/health` → HTTP 200**.
-7. Starts one ETL execution if none has succeeded yet.
-8. Runs `scripts/smoke_test.py`.
+1. Validates the `GCP_*` repository variables: none may be empty, contain whitespace or a
+   newline, or have the wrong format.
+2. Checks that the four required secrets have a version (CoinPaprika is optional).
+3. Builds and pushes the image.
+4. Deploys the service with `RUN_ETL_ON_STARTUP=false`, so the ETL runs only from the job.
+5. Deploys the job.
+6. Upserts the hourly scheduler.
+7. Requires **`/health` → HTTP 200**.
+8. Starts one ETL execution if none has succeeded yet.
+9. Runs `scripts/smoke_test.py`.
 
 The service URL is in the job summary.
 

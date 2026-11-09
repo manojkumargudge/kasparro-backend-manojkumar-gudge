@@ -82,6 +82,46 @@ jobs:
       RUNTIME_SA: ${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
       SCHEDULER_SA: ${{ vars.GCP_SCHEDULER_SERVICE_ACCOUNT }}
     steps:
+      - name: Validate GCP repository variables
+        env:
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          GCP_RUNTIME_SERVICE_ACCOUNT: ${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
+          GCP_SCHEDULER_SERVICE_ACCOUNT: ${{ vars.GCP_SCHEDULER_SERVICE_ACCOUNT }}
+        run: |
+          # Fail fast with a clear message instead of a confusing error in a later step
+          # (e.g. "Invalid format" when a pasted value contains a newline).
+          sa_re='^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$'
+          declare -A pattern=(
+            [GCP_PROJECT_ID]='^[a-z][a-z0-9-]{4,28}[a-z0-9]$'
+            [GCP_REGION]='^[a-z]+-[a-z]+[0-9]+$'
+            [GCP_WORKLOAD_IDENTITY_PROVIDER]='^projects/[0-9]+/locations/global/workloadIdentityPools/[a-z0-9-]+/providers/[a-z0-9-]+$'
+            [GCP_DEPLOY_SERVICE_ACCOUNT]="$sa_re"
+            [GCP_RUNTIME_SERVICE_ACCOUNT]="$sa_re"
+            [GCP_SCHEDULER_SERVICE_ACCOUNT]="$sa_re"
+          )
+          bad=0
+          for name in GCP_PROJECT_ID GCP_REGION GCP_WORKLOAD_IDENTITY_PROVIDER \
+                      GCP_DEPLOY_SERVICE_ACCOUNT GCP_RUNTIME_SERVICE_ACCOUNT GCP_SCHEDULER_SERVICE_ACCOUNT; do
+            value="${!name}"
+            if [ -z "$value" ]; then
+              echo "::error::Repository variable ${name} is empty or not set."
+              bad=1
+            elif [[ "$value" =~ [[:space:]] ]]; then
+              echo "::error::Repository variable ${name} contains whitespace or a newline (length ${#value}): $(printf '%q' "$value")"
+              bad=1
+            elif ! [[ "$value" =~ ${pattern[$name]} ]]; then
+              echo "::error::Repository variable ${name} has an unexpected format: ${value}"
+              bad=1
+            fi
+          done
+          if [ "$bad" != 0 ]; then
+            echo "Fix with: gh variable set NAME --body 'value'  (see docs/DEPLOY_GCP.md step 4)"
+            exit 1
+          fi
+          echo "All GCP_* repository variables look valid."
       - uses: actions/checkout@v4
       - uses: google-github-actions/auth@v2
         with:
