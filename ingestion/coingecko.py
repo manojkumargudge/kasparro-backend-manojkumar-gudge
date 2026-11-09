@@ -10,7 +10,7 @@ from typing import Any
 
 from core.config import env_int, env_str
 from ingestion import http
-from ingestion.base import Source
+from ingestion.base import Source, log_auth_mode
 from schemas.coin import CoinGeckoRecord
 
 DEFAULT_BASE_URL = "https://api.coingecko.com/api/v3"
@@ -34,6 +34,7 @@ class CoinGeckoSource(Source):
     incremental = "watermark"
 
     def fetch(self) -> Iterator[dict[str, Any]]:
+        log_auth_mode(self.name, "x-cg-demo-api-key" if os.getenv("COINGECKO_API_KEY") else None)
         per_page = env_int("COINGECKO_PER_PAGE", 50)
         for page in range(1, env_int("COINGECKO_PAGES", 1) + 1):
             params = {"vs_currency": "usd", "order": "market_cap_desc", "per_page": per_page, "page": page}

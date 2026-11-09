@@ -1,0 +1,12 @@
+[
+  {
+    "name": "keep-2-newest",
+    "action": { "type": "Keep" },
+    "mostRecentVersions": { "keepCount": 2 }
+  },
+  {
+    "name": "delete-everything-else",
+    "action": { "type": "Delete" },
+    "condition": { "tagState": "any", "olderThan": "1d" }
+  }
+]

@@ -9,8 +9,41 @@ Requirements are in [`docs/BRIEF.md`](docs/BRIEF.md). The [coverage table](#brie
 below maps each requirement to its code and the test that proves it. Cloud deployment
 (GCP) is prepared but not yet live; see [`docs/DEPLOY_GCP.md`](docs/DEPLOY_GCP.md).
 
-CI on `main` runs ruff (lint + format), mypy, actionlint, shellcheck, **111 tests against
+CI on `main` runs ruff (lint + format), mypy, actionlint, shellcheck, **113 tests against
 PostgreSQL** with a coverage gate of 85% (currently 95%), a Docker build, and `make test`.
+
+## Live deployment
+
+| | |
+|---|---|
+| **Live URL** | _pending first deploy_ (`/health`, `/docs`) |
+| **Region** | GCP `asia-south1` (Mumbai); Neon Postgres in AWS `ap-south-1` (Mumbai) |
+| **API** | Cloud Run service `kasparro-api`, `min-instances 0`, `max-instances 2`, `RUN_ETL_ON_STARTUP=false` |
+| **ETL** | Cloud Run job `kasparro-etl`, started hourly by Cloud Scheduler (`0 * * * *` UTC) |
+| **Secrets** | Secret Manager only: `DATABASE_URL`, `APP_API_KEY`, `COINGECKO_API_KEY`, `COINPAPRIKA_API_KEY` |
+| **Deploy** | `.github/workflows/deploy.yml` through Workload Identity Federation (no JSON keys); fails unless `/health` returns 200 |
+
+```text
+Cloud Scheduler ──hourly──▶ Cloud Run job (python scripts/run_etl.py) ──┐
+                                                                        ├──▶ Neon Postgres (TLS, sslmode=require)
+Internet ──HTTPS──▶ Cloud Run service (uvicorn main:app, scales to 0) ──┘
+        JSON logs (severity) ──▶ Cloud Logging ──▶ log-based metrics (run success/failure, records)
+```
+
+**Cold start:** _to be measured after deploy (3 tries after ≥20 min idle)_. With
+`min-instances 0`, the first request after an idle period has to wait for:
+- the container to start;
+- the Alembic migration check;
+- a suspended Neon compute to wake.
+
+Later requests are warm. Setting `min-instances 1` would remove the cold start, but it is
+not free.
+
+**Free tier:** see the table with sources in [`docs/DEPLOY_GCP.md`](docs/DEPLOY_GCP.md#free-tier-budget).
+The Cloud Run **jobs** allowance (240,000 vCPU-s / 450,000 GiB-s per month) is
+**unverified**: it appears in Google's pricing page snippets, but cached copies disagree and
+the live page could not be read. At ~43,200 vCPU-s/month this ETL stays below even the
+lowest figure seen (180,000).
 
 ---
 

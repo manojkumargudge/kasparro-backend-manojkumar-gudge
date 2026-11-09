@@ -10,7 +10,7 @@ set -euo pipefail
 
 : "${PROJECT_ID:?set PROJECT_ID}"
 : "${GITHUB_REPO:?set GITHUB_REPO (owner/repo)}"
-REGION="${REGION:-us-central1}"
+REGION="${REGION:-asia-south1}"
 AR_REPO="${AR_REPO:-kasparro}"
 POOL="${WIF_POOL:-github}"
 PROVIDER="${WIF_PROVIDER:-github-oidc}"
@@ -35,6 +35,9 @@ log "Artifact Registry repository ${AR_REPO} (${REGION})"
 exists gcloud artifacts repositories describe "$AR_REPO" --location "$REGION" ||
   gcloud artifacts repositories create "$AR_REPO" --repository-format=docker --location "$REGION" \
     --description "kasparro-backend images"
+# Stay inside the 0.5 GB Artifact Registry free allowance: keep the 2 newest images only.
+gcloud artifacts repositories set-cleanup-policies "$AR_REPO" --location "$REGION" \
+  --policy "$HERE/ar-cleanup-policy.json" --no-dry-run >/dev/null
 
 log "Service accounts"
 for sa in kasparro-runtime kasparro-deployer kasparro-scheduler; do
@@ -74,8 +77,8 @@ log "Secret Manager"
 SECRETS=(
   "kasparro-database-url|DATABASE_URL|required"
   "kasparro-app-api-key|APP_API_KEY|required"
-  "kasparro-coingecko-api-key|COINGECKO_API_KEY|optional"
-  "kasparro-coinpaprika-api-key|COINPAPRIKA_API_KEY|optional"
+  "kasparro-coingecko-api-key|COINGECKO_API_KEY|required"
+  "kasparro-coinpaprika-api-key|COINPAPRIKA_API_KEY|required"
 )
 for entry in "${SECRETS[@]}"; do
   IFS='|' read -r name var kind <<<"$entry"
