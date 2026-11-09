@@ -77,10 +77,51 @@ jobs:
       id-token: write
     env:
       PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
-      REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+      REGION: ${{ vars.GCP_REGION || 'asia-south1' }}
+      COINPAPRIKA_BASE_URL: ${{ vars.COINPAPRIKA_BASE_URL }}
       RUNTIME_SA: ${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
       SCHEDULER_SA: ${{ vars.GCP_SCHEDULER_SERVICE_ACCOUNT }}
     steps:
+      - name: Validate GCP repository variables
+        env:
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          GCP_RUNTIME_SERVICE_ACCOUNT: ${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
+          GCP_SCHEDULER_SERVICE_ACCOUNT: ${{ vars.GCP_SCHEDULER_SERVICE_ACCOUNT }}
+        run: |
+          # Fail fast with a clear message instead of a confusing error in a later step
+          # (e.g. "Invalid format" when a pasted value contains a newline).
+          sa_re='^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$'
+          declare -A pattern=(
+            [GCP_PROJECT_ID]='^[a-z][a-z0-9-]{4,28}[a-z0-9]$'
+            [GCP_REGION]='^[a-z]+-[a-z]+[0-9]+$'
+            [GCP_WORKLOAD_IDENTITY_PROVIDER]='^projects/[0-9]+/locations/global/workloadIdentityPools/[a-z0-9-]+/providers/[a-z0-9-]+$'
+            [GCP_DEPLOY_SERVICE_ACCOUNT]="$sa_re"
+            [GCP_RUNTIME_SERVICE_ACCOUNT]="$sa_re"
+            [GCP_SCHEDULER_SERVICE_ACCOUNT]="$sa_re"
+          )
+          bad=0
+          for name in GCP_PROJECT_ID GCP_REGION GCP_WORKLOAD_IDENTITY_PROVIDER \
+                      GCP_DEPLOY_SERVICE_ACCOUNT GCP_RUNTIME_SERVICE_ACCOUNT GCP_SCHEDULER_SERVICE_ACCOUNT; do
+            value="${!name}"
+            if [ -z "$value" ]; then
+              echo "::error::Repository variable ${name} is empty or not set."
+              bad=1
+            elif [[ "$value" =~ [[:space:]] ]]; then
+              echo "::error::Repository variable ${name} contains whitespace or a newline (length ${#value}): $(printf '%q' "$value")"
+              bad=1
+            elif ! [[ "$value" =~ ${pattern[$name]} ]]; then
+              echo "::error::Repository variable ${name} has an unexpected format: ${value}"
+              bad=1
+            fi
+          done
+          if [ "$bad" != 0 ]; then
+            echo "Fix with: gh variable set NAME --body 'value'  (see docs/DEPLOY_GCP.md step 4)"
+            exit 1
+          fi
+          echo "All GCP_* repository variables look valid."
       - uses: actions/checkout@v4
       - uses: google-github-actions/auth@v2
         with:
@@ -92,7 +133,11 @@ jobs:
         run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
       - name: Image reference
         id: image
-        run: echo "ref=${REGION}-docker.pkg.dev/${PROJECT_ID}/kasparro/${IMAGE_NAME}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+        shell: bash
+        run: |
+          IMAGE_REF="${REGION}-docker.pkg.dev/${PROJECT_ID}/kasparro/${IMAGE_NAME}:${GITHUB_SHA}"
+          printf 'ref=%s\n' "$IMAGE_REF" >> "$GITHUB_OUTPUT"
+          echo "Image reference prepared successfully."
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -103,30 +148,45 @@ jobs:
       - name: Secret bindings
         id: secrets
         run: |
-          # Required secrets must exist; optional upstream keys are bound only if they have a version.
-          bindings="DATABASE_URL=kasparro-database-url:latest,APP_API_KEY=kasparro-app-api-key:latest"
-          for pair in COINGECKO_API_KEY=kasparro-coingecko-api-key COINPAPRIKA_API_KEY=kasparro-coinpaprika-api-key; do
+          # Four required secrets; CoinPaprika authentication is optional.
+          bindings=""
+          missing=0
+          for pair in DATABASE_URL=kasparro-database-url APP_API_KEY=kasparro-app-api-key \
+                      APP_DEMO_API_KEY=kasparro-demo-api-key \
+                      COINGECKO_API_KEY=kasparro-coingecko-api-key; do
             name="${pair#*=}"
             if gcloud secrets versions list "$name" --filter=state=ENABLED --limit=1 --format='value(name)' 2>/dev/null | grep -q .; then
-              bindings="${bindings},${pair}:latest"
+              bindings="${bindings:+${bindings},}${pair}:latest"
             else
-              echo "::notice::${name} has no version; ${pair%%=*} not set (keyless tier)."
+              echo "::error::Required secret ${name} has no enabled version."
+              missing=1
             fi
           done
+          [ "$missing" = 0 ] || exit 1
+
+          if gcloud secrets versions list kasparro-coinpaprika-api-key --filter=state=ENABLED --limit=1 --format='value(name)' 2>/dev/null | grep -q .; then
+            bindings="${bindings},COINPAPRIKA_API_KEY=kasparro-coinpaprika-api-key:latest"
+          else
+            echo "CoinPaprika key absent; using free unauthenticated API."
+          fi
           echo "bindings=${bindings}" >> "$GITHUB_OUTPUT"
+          # Non-secret runtime settings shared by the service and the job.
+          envs="FAIL_ON_ERROR=1"
+          if [ -n "$COINPAPRIKA_BASE_URL" ]; then envs="${envs},COINPAPRIKA_BASE_URL=${COINPAPRIKA_BASE_URL}"; fi
+          echo "envs=${envs}" >> "$GITHUB_OUTPUT"
       - name: Deploy API (Cloud Run service)
         run: |
           gcloud run deploy "$SERVICE" --image "${{ steps.image.outputs.ref }}" --region "$REGION" \
             --service-account "$RUNTIME_SA" --allow-unauthenticated \
             --set-secrets "${{ steps.secrets.outputs.bindings }}" \
-            --set-env-vars "RUN_ETL_ON_STARTUP=0" \
-            --min-instances 0 --max-instances 3 --cpu 1 --memory 512Mi --quiet
+            --set-env-vars "${{ steps.secrets.outputs.envs }},RUN_ETL_ON_STARTUP=false" \
+            --min-instances 0 --max-instances 2 --cpu 1 --memory 512Mi --quiet
       - name: Deploy ETL (Cloud Run job)
         run: |
           gcloud run jobs deploy "$JOB" --image "${{ steps.image.outputs.ref }}" --region "$REGION" \
             --service-account "$RUNTIME_SA" \
             --set-secrets "${{ steps.secrets.outputs.bindings }}" \
-            --set-env-vars "FAIL_ON_ERROR=1" \
+            --set-env-vars "${{ steps.secrets.outputs.envs }}" \
             --command python --args scripts/run_etl.py \
             --tasks 1 --max-retries 1 --task-timeout 900s --cpu 1 --memory 512Mi --quiet
       - name: Schedule ETL hourly (Cloud Scheduler)
@@ -139,9 +199,24 @@ jobs:
           else
             gcloud scheduler jobs create http "${JOB}-hourly" "${args[@]}" --quiet
           fi
-      - name: Smoke test
+      - name: Health check (must be HTTP 200)
+        id: health
         run: |
           url="$(gcloud run services describe "$SERVICE" --region "$REGION" --format 'value(status.url)')"
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+          code=000
+          for attempt in 1 2 3 4 5 6; do
+            code="$(curl -s -o /tmp/health.json -w '%{http_code}' --max-time 30 "$url/health" || true)"
+            echo "attempt ${attempt}: HTTP ${code}"
+            [ "$code" = "200" ] && break
+            sleep 10
+          done
+          cat /tmp/health.json; echo
+          [ "$code" = "200" ] || { echo "::error::$url/health returned HTTP ${code}"; exit 1; }
+          echo "### Live: ${url}/health returned 200" >> "$GITHUB_STEP_SUMMARY"
+      - name: Smoke test
+        run: |
+          url="${{ steps.health.outputs.url }}"
           key="$(gcloud secrets versions access latest --secret kasparro-app-api-key)"
           echo "::add-mask::$key"
           echo "Service URL: $url" >> "$GITHUB_STEP_SUMMARY"

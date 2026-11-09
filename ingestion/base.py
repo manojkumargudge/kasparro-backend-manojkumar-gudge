@@ -3,12 +3,23 @@
 import datetime as dt
 import hashlib
 import json
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from typing import Any, ClassVar
 
 from ingestion.drift import DriftReport
 from schemas.coin import NormalizedCoin, SourceRecord
+
+log = logging.getLogger(__name__)
+
+
+def log_auth_mode(source: str, header: str | None) -> None:
+    """Record whether a source call is keyed (header name only, never the value)."""
+    mode = "api_key" if header else "keyless"
+    log.info(
+        "%s auth: %s", source, f"API key via {header}" if header else "keyless", extra={"source": source, "auth": mode}
+    )
 
 
 class Source(ABC):

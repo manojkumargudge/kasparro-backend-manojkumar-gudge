@@ -10,7 +10,7 @@ from typing import Any
 
 from core.config import env_int, env_str
 from ingestion import http
-from ingestion.base import Source
+from ingestion.base import Source, log_auth_mode
 from schemas.coin import CoinPaprikaRecord
 
 DEFAULT_BASE_URL = "https://api.coinpaprika.com/v1"
@@ -34,6 +34,7 @@ class CoinPaprikaSource(Source):
     incremental = "watermark"
 
     def fetch(self) -> Iterator[dict[str, Any]]:
+        log_auth_mode(self.name, "Authorization" if os.getenv("COINPAPRIKA_API_KEY") else None)
         data = http.get_json(self.name, tickers_url(), headers=build_headers())
         if not isinstance(data, list):
             raise http.FetchError(f"coinpaprika: expected a list, got {type(data).__name__}")

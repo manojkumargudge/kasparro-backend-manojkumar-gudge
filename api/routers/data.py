@@ -6,10 +6,10 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from api.deps import get_db, rate_limited_client
+from api.deps import get_db, read_client
 from core.models import Coin
 
-router = APIRouter(tags=["data"], dependencies=[Depends(rate_limited_client)])
+router = APIRouter(tags=["data"], dependencies=[Depends(read_client)])
 
 SORTS = {"price_usd": Coin.price_usd, "market_cap": Coin.market_cap, "symbol": Coin.symbol}
 

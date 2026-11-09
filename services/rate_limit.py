@@ -21,12 +21,13 @@ class RateLimitDecision:
     retry_after: int  # seconds until the window resets
 
 
-def limits() -> tuple[int, int]:
-    return env_int("API_RATE_LIMIT", 60), max(1, env_int("API_RATE_WINDOW_SECONDS", 60))
+def window_seconds() -> int:
+    return max(1, env_int("API_RATE_WINDOW_SECONDS", 60))
 
 
-def hit(db: Session, key_hash: str) -> RateLimitDecision:
-    limit, window = limits()
+def hit(db: Session, key_hash: str, limit: int) -> RateLimitDecision:
+    """Count one request for ``key_hash`` against its own ``limit`` per window."""
+    window = window_seconds()
     now: dt.datetime = db.execute(select(func.now())).scalar_one()
     epoch = now.timestamp()
     window_start = dt.datetime.fromtimestamp(epoch - (epoch % window), tz=dt.UTC)

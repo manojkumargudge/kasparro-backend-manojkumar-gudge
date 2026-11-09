@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from core.models import Coin, EtlRun, PriceSnapshot
+from core.redact import redact
 
 COMPLETED = ("success", "partial")
 ANOMALY_METRICS = ("records_in", "duration_seconds")
@@ -27,7 +28,7 @@ def run_to_dict(run: EtlRun) -> dict[str, Any]:
         "records_updated": run.records_updated,
         "records_unchanged": run.records_unchanged,
         "records_invalid": run.records_invalid,
-        "error": run.error,
+        "error": redact(run.error),
         "checkpoint": run.checkpoint,
         "drift": run.drift,
         "meta": run.meta,
@@ -176,7 +177,7 @@ def compare_runs(
                     "metric": "status",
                     "anomaly": "latest run failed",
                     "run_id": latest_any[0].id,
-                    "error": latest_any[0].error,
+                    "error": redact(latest_any[0].error),
                 }
             )
         if completed:
@@ -227,7 +228,7 @@ def health_summary(db: Session) -> dict[str, Any]:
             "duration_seconds": r.duration_seconds,
             "records_in": r.records_in,
             "records_invalid": r.records_invalid,
-            "error": r.error,
+            "error": redact(r.error),
         }
         for r in latest
     ]

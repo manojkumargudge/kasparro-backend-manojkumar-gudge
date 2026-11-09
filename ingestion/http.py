@@ -102,7 +102,7 @@ def get_json(
             reason = f"HTTP {status}"
         except (requests.ConnectionError, requests.Timeout) as exc:
             reason = type(exc).__name__
-        except ValueError as exc:  # invalid JSON body
+        except requests.JSONDecodeError as exc:
             raise FetchError(f"{source}: invalid JSON response") from exc
 
         if attempt == max_retries:

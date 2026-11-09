@@ -62,16 +62,16 @@ def test_data_rejects_bad_params(client):
 
 
 # ----------------------------------------------------------------- auth
-@pytest.mark.parametrize("path", ["/data", "/stats", "/runs", "/compare-runs"])
+@pytest.mark.parametrize("path", ["/data", "/stats", "/runs", "/compare-runs", "/metrics"])
 def test_protected_routes_require_key(client, path):
     assert client.get(path).status_code == 401
     assert client.get(path, headers={"X-API-KEY": "wrong"}).status_code == 401
     assert client.get(path, headers=H).status_code == 200
 
 
-def test_public_routes(client):
-    for path in ("/health", "/metrics", "/dashboard"):
-        assert client.get(path).status_code == 200
+@pytest.mark.parametrize("path", ["/health", "/docs", "/redoc", "/openapi.json", "/dashboard"])
+def test_public_routes(client, path):
+    assert client.get(path).status_code == 200
 
 
 def test_missing_server_key_is_500(client, monkeypatch):
@@ -225,7 +225,7 @@ def test_metrics_prometheus_format_without_secrets(client, coins, db, monkeypatc
     seed_run(db, "coingecko", status="failed")
     client.get("/data", headers=H)
 
-    r = client.get("/metrics")
+    r = client.get("/metrics", headers=H)
 
     assert r.status_code == 200 and r.headers["content-type"].startswith("text/plain")
     text = r.text
@@ -250,13 +250,15 @@ def test_metrics_when_db_down(client, monkeypatch):
         raise OperationalError("x", {}, Exception("down"))
 
     monkeypatch.setattr(services.metrics, "SessionLocal", broken)
-    assert "kasparro_db_up 0.0" in client.get("/metrics").text
+    assert "kasparro_db_up 0.0" in client.get("/metrics", headers=H).text
 
 
 def test_rate_limited_counter(client, monkeypatch):
-    monkeypatch.setenv("API_RATE_LIMIT", "0")
+    monkeypatch.setenv("API_RATE_LIMIT", "0")  # owner key exhausted
+    monkeypatch.setenv("APP_DEMO_API_KEY", "demo-key-123")
     assert client.get("/stats", headers=H).status_code == 429
-    assert "kasparro_api_rate_limited_total" in client.get("/metrics").text
+    metrics = client.get("/metrics", headers={"X-API-KEY": "demo-key-123"})
+    assert "kasparro_api_rate_limited_total" in metrics.text
 
 
 # ----------------------------------------------------------------- startup

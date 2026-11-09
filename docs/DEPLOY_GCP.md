@@ -1,239 +1,279 @@
-# Deploying to Google Cloud
+# Deploying to Google Cloud (asia-south1, free tier)
 
-The deployment covers brief items **F.3** (public API), **F.4** (scheduled ETL) and
-**F.5** (logs and metrics in the cloud console). The same container image runs both
-workloads:
+Target: a public API on Cloud Run and an hourly ETL as a Cloud Run job started by Cloud
+Scheduler. Postgres is on Neon in **Singapore** (`aws-ap-southeast-1`); Mumbai is not
+available on Neon's free plan. Secrets live only in Secret Manager.
+GCP region: **`asia-south1` (Mumbai)**.
 
 | Piece | GCP service | Name |
 |---|---|---|
-| Public API | Cloud Run **service** | `kasparro-api` |
-| ETL | Cloud Run **job** (`python scripts/run_etl.py`) | `kasparro-etl` |
-| Hourly trigger | Cloud Scheduler (HTTP → Run Admin API) | `kasparro-etl-hourly` |
-| Images | Artifact Registry (also published to GHCR) | `REGION-docker.pkg.dev/PROJECT/kasparro/kasparro-backend` |
-| Secrets | Secret Manager | `kasparro-database-url`, `kasparro-app-api-key`, `kasparro-coingecko-api-key`, `kasparro-coinpaprika-api-key` |
-| Database | Neon Postgres (`sslmode=require`), or Cloud SQL | — |
-| Logs / metrics | Cloud Logging + log-based metrics | `kasparro_etl_run_success`, `kasparro_etl_run_failure`, `kasparro_etl_records_in`, `kasparro_etl_records_inserted` |
+| Public API | Cloud Run service, `min-instances 0`, `max-instances 2`, `RUN_ETL_ON_STARTUP=false` | `kasparro-api` |
+| ETL | Cloud Run job, `python scripts/run_etl.py` | `kasparro-etl` |
+| Hourly trigger | Cloud Scheduler `0 * * * *` (HTTP → Run Admin API) | `kasparro-etl-hourly` |
+| Images | Artifact Registry, cleanup policy keeps the 2 newest | `asia-south1-docker.pkg.dev/PROJECT/kasparro/kasparro-backend` |
+| Secrets | Secret Manager: four required, one optional | `kasparro-database-url`, `kasparro-app-api-key` (owner, 60/min), `kasparro-demo-api-key` (reviewers, read-only, 20/min), `kasparro-coingecko-api-key`; optional `kasparro-coinpaprika-api-key` (bound only if it has a version; otherwise the free keyless CoinPaprika API is used) |
+| Database | Neon Postgres, AWS `aws-ap-southeast-1` (Singapore), direct endpoint, `sslmode=require` | — |
+| Logs / metrics | Cloud Logging + 4 log-based metrics | `kasparro_etl_run_success`, `_failure`, `_records_in`, `_records_inserted` |
 
 ```text
-GitHub push to main
-  └─ .github/workflows/deploy.yml
-       ├─ publish:    build → ghcr.io/<owner>/kasparro-backend:{sha-…,latest}   (always)
-       └─ deploy-gcp: OIDC → Workload Identity Federation → deployer SA          (only if GCP vars are set)
-            ├─ build → Artifact Registry
-            ├─ gcloud run deploy kasparro-api          (RUN_ETL_ON_STARTUP=0, secrets from Secret Manager)
-            ├─ gcloud run jobs deploy kasparro-etl     (max-retries 1, 15 min timeout)
-            ├─ Cloud Scheduler "0 * * * *" → jobs/kasparro-etl:run
-            └─ scripts/smoke_test.py against the service URL
+GitHub (push to main or manual run) ──OIDC──▶ Workload Identity Federation ──▶ kasparro-deployer SA
+   build image → Artifact Registry → deploy service + job → upsert scheduler → /health must be 200 → smoke test
 
-Cloud Scheduler ──hourly──▶ Cloud Run job ──▶ Neon Postgres ◀── Cloud Run service ◀── public HTTPS
-                                 │                                    │
-                                 └──── JSON logs (severity) ──────────┴──▶ Cloud Logging ──▶ log-based metrics
+Cloud Scheduler ──hourly──▶ Cloud Run job (ETL) ──┐
+                                                  ├──▶ Neon Postgres (Singapore, TLS)
+Internet ──HTTPS──▶ Cloud Run service (API) ──────┘
+     both write JSON logs (with severity) ──▶ Cloud Logging ──▶ log-based metrics
 ```
 
-There are no JSON service-account keys anywhere. GitHub Actions authenticates through
-Workload Identity Federation, and the trust is restricted to this repository. The deploy job
-is **skipped**, not failed, until the GCP repository variables exist.
+There are no JSON service-account keys anywhere. The image contains no secrets
+(`.dockerignore` excludes `.env`). Secrets are injected at runtime with `--set-secrets`.
 
 ---
 
-## 1. Prerequisites (one time)
+## Free-tier budget
 
-1. A GCP project with billing enabled. Note its **project ID**.
-2. The `gcloud` CLI, logged in as a project owner (`gcloud auth login`). Cloud Shell works
-   and already has everything installed.
-3. A Postgres database (next step).
+| Item | This deployment | Monthly free allowance | Source |
+|---|---|---|---|
+| Cloud Run service | request-based billing, scales to 0 | 2M requests, 180,000 vCPU-s, 360,000 GiB-s | [Cloud Run pricing](https://cloud.google.com/run/pricing) |
+| Cloud Run job | 720 runs × ~1 min (billed at least 1 min each) × 1 vCPU ≈ 43,200 vCPU-s, 21,600 GiB-s | 240,000 vCPU-s, 450,000 GiB-s, **unverified**: seen in Google's pricing page snippets, but cached copies disagree (180k / 200k) and the live page could not be read | [Cloud Run pricing](https://cloud.google.com/run/pricing) |
+| asia-south1 | Tier 1 since Nov 2024; free tier applied at Tier 1 prices | — | [Release notes](https://docs.cloud.google.com/run/docs/release-notes), [Locations](https://docs.cloud.google.com/run/docs/locations) |
+| Network egress | API responses to clients, plus Cloud Run → Neon (Singapore) traffic, which leaves Google's network | 1 GB free **in North America only**; egress from Mumbai is billed (fractions of a cent at demo volume) | [Cloud Run pricing](https://cloud.google.com/run/pricing) |
+| Cloud Scheduler | 1 job | 3 jobs per billing account | [GCP free tier](https://cloud.google.com/free) |
+| Secret Manager | 4–5 secrets × 1 version; ~4–5k reads/month | 6 active versions, 10,000 access ops | [GCP free tier](https://cloud.google.com/free) |
+| Artifact Registry | ~150–250 MB/image, 2 kept | 0.5 GB storage | [GCP free tier](https://cloud.google.com/free) |
+| Logging | small | 50 GiB/month | [GCP free tier](https://cloud.google.com/free) |
 
-## 2. Create the database
+With 5 secrets, only **one** spare version fits in the free 6 (two with 4). When you rotate a secret,
+**destroy** the old version (`gcloud secrets versions destroy N --secret NAME`).
 
-### Option A: Neon (recommended, free tier)
+## Access model
 
-1. Create a project at neon.tech and pick the region closest to your Cloud Run region.
-2. Copy the **direct** connection string, not the pooled one (no `-pooler` in the host):
+| Endpoint | Access |
+|---|---|
+| `/health`, `/docs`, `/redoc`, `/openapi.json`, `/dashboard` (static page; it uses the key you type in, kept in sessionStorage) | public |
+| `/data`, `/stats`, `/runs`, `/compare-runs`, `/metrics` | `X-API-KEY` with `read` scope |
+| future write/admin routes | `X-API-KEY` with `admin` scope (owner key only) |
+
+Each key has its own rate limit, counted in Postgres by key fingerprint. There is no
+IP-based limiting.
+
+- **Owner** (`APP_API_KEY`): 60/min, `read` + `admin`.
+- **Demo** (`APP_DEMO_API_KEY`): 20/min, `read`. Published in the README for reviewers.
+- **Extra keys** (`APP_API_KEYS`, format `label:key:limit[:scope+scope]`) are also possible.
+
+To scrape `/metrics` with Prometheus, set the header in the scrape config
+(`authorization`/`http_headers` → `X-API-KEY`).
+
+---
+
+## Billable resources: what each step creates
+
+Every resource below has a free allowance, but all of them are billable SKUs. Nothing is
+created until you run the commands yourself.
+
+| Step | Creates | Billable? |
+|---|---|---|
+| 1 | Neon project (outside GCP) | Neon free plan |
+| 2 | GCP project, billing link, **budget + alerts** | Budgets are free |
+| 3 `bootstrap.sh` | APIs enabled; Artifact Registry repo + cleanup policy; 3 service accounts; WIF pool/provider; 4–5 secrets + versions; 4 log-based metrics | AR storage, Secret Manager, Monitoring (all within the free allowance at this size). SAs, WIF and IAM are free |
+| 5 deploy workflow | Cloud Run service, Cloud Run job, Cloud Scheduler job; one job execution | Cloud Run, Scheduler (within the free allowance) |
+
+---
+
+## 1. Neon (Singapore)
+
+1. In the Neon console, create a project in **AWS Asia Pacific (Singapore) `aws-ap-southeast-1`**.
+   Mumbai (`aws-ap-south-1`) is not available on Neon's free plan; Singapore is the closest
+   free region to `asia-south1`. Every database round trip crosses Mumbai ↔ Singapore,
+   which adds latency to cold starts and queries (see the measured numbers in the README).
+2. Under *Connection details*, turn **Connection pooling OFF** and copy the **direct** string.
+   The host must not contain `-pooler`:
 
    ```text
-   postgresql://USER:PASSWORD@ep-xxxx-xxxx.us-east-2.aws.neon.tech/neondb?sslmode=require
+   postgresql://USER:PASSWORD@ep-xxxx-xxxx.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
    ```
 
-   The ETL uses session-level Postgres advisory locks so the scheduled job and a manual run
-   never process the same source at once. PgBouncer in transaction mode, which is what
-   Neon's pooled endpoint uses, does not keep those locks, so use the direct endpoint.
-   `sslmode=require` is mandatory on Neon.
-3. You don't need to create any tables. Alembic migrations run automatically on API startup
-   and before every ETL run.
+   The ETL uses session-level advisory locks, and Neon's pooled (PgBouncer transaction mode)
+   endpoint drops them. `sslmode=require` is mandatory.
+3. You don't need to create any tables. Alembic migrations run on API startup and before
+   every ETL run.
 
-### Option B: Cloud SQL for PostgreSQL
+Check Neon's current free-plan limits (storage, compute hours) in its pricing page; they
+weren't verified here. The hourly job wakes the compute for a few minutes each hour.
 
-1. `gcloud sql instances create kasparro-pg --database-version=POSTGRES_15 --tier=db-f1-micro --region=REGION`
-2. Create a database and user: `gcloud sql databases create kasparro --instance kasparro-pg`, then
-   `gcloud sql users create kasparro --instance kasparro-pg --password=…`
-3. Connect Cloud Run through the Unix socket. Add
-   `--add-cloudsql-instances PROJECT:REGION:kasparro-pg` to both `gcloud run deploy` and
-   `gcloud run jobs deploy` in `deploy.yml`, give the runtime SA `roles/cloudsql.client`, and use:
+## 2. GCP project, billing and a budget alert
 
-   ```text
-   postgresql://kasparro:PASSWORD@/kasparro?host=/cloudsql/PROJECT:REGION:kasparro-pg
-   ```
-
-Cloud SQL costs money even when idle, which is why Neon is the default here.
-
-## 3. Bootstrap GCP (APIs, registry, service accounts, WIF, secrets, metrics)
-
-From a clone of this repo, in Cloud Shell or a Linux/macOS shell:
+In [Cloud Shell](https://shell.cloud.google.com):
 
 ```bash
-export PROJECT_ID=your-project-id REGION=us-central1 GITHUB_REPO=manojkumargudge/kasparro-backend-manojkumar-gudge
+export PROJECT_ID=kasparro-<something-unique> REGION=asia-south1
+gcloud projects create "$PROJECT_ID"
+gcloud billing accounts list                                   # note ACCOUNT_ID and its currency
+export BILLING_ACCOUNT=XXXXXX-XXXXXX-XXXXXX
+gcloud billing projects link "$PROJECT_ID" --billing-account "$BILLING_ACCOUNT"
+gcloud config set project "$PROJECT_ID"
+```
 
-# Optional: provide secret values now. They are piped to Secret Manager and never printed.
-read -rs DATABASE_URL && export DATABASE_URL          # the Neon direct URL from step 2
-export APP_API_KEY="$(openssl rand -hex 24)"           # client key for X-API-KEY; keep it somewhere safe
-read -rs COINGECKO_API_KEY && export COINGECKO_API_KEY       # optional: CoinGecko demo key
-read -rs COINPAPRIKA_API_KEY && export COINPAPRIKA_API_KEY   # optional: CoinPaprika key
+**Budget alert (do this before deploying anything).** It emails the billing admins at 50%,
+90% and 100% of a tiny budget. Use your billing account's currency: `100INR`, or `1USD`
+for a USD account.
 
+```bash
+gcloud services enable billingbudgets.googleapis.com
+gcloud billing budgets create --billing-account "$BILLING_ACCOUNT" \
+  --display-name "kasparro free-tier guard" --budget-amount 100INR \
+  --filter-projects "projects/$PROJECT_ID" \
+  --threshold-rule percent=0.5 --threshold-rule percent=0.9 --threshold-rule percent=1.0
+```
+
+A budget alerts; it does **not** stop spending. Kill switch, if an alert ever fires
+unexpectedly: `gcloud billing projects unlink "$PROJECT_ID"`. This disables billing and stops
+all paid services in the project.
+
+## 3. Bootstrap
+
+Get the upstream keys first:
+
+- **CoinGecko demo key**: CoinGecko developer dashboard → *Demo* plan → API key. It is sent
+  as `x-cg-demo-api-key` to `api.coingecko.com`.
+- **CoinPaprika key**: from your CoinPaprika API dashboard. It is sent as `Authorization`.
+  The free host `api.coinpaprika.com` accepts requests **without** a key and ignores the
+  header (tested), so a key only matters on the host your plan uses. If your key is for
+  the Pro host, set the repo variable `COINPAPRIKA_BASE_URL=https://api-pro.coinpaprika.com/v1`
+  (step 4).
+
+  Check your keys before deploying. CoinPaprika Pro should print 200. CoinGecko printing 200
+  only means the host is reachable: it did not reject a made-up demo key in testing, so
+  confirm the key through the request counter in the CoinGecko dashboard after the first ETL run.
+
+**Enter every secret with `read -s VAR; export VAR`.** The value is typed or pasted at a
+hidden prompt, so it never lands in shell history or on screen. Never put it on the command
+line (`export VAR=value` is saved to history).
+
+  ```bash
+  read -s COINPAPRIKA_API_KEY; export COINPAPRIKA_API_KEY
+  curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: $COINPAPRIKA_API_KEY" https://api-pro.coinpaprika.com/v1/tickers/btc-bitcoin
+  read -s COINGECKO_API_KEY; export COINGECKO_API_KEY
+  curl -s -o /dev/null -w '%{http_code}\n' -H "x-cg-demo-api-key: $COINGECKO_API_KEY" "https://api.coingecko.com/api/v3/ping"
+  ```
+
+Then, from a clone of the repo in Cloud Shell:
+
+```bash
+git clone https://github.com/manojkumargudge/kasparro-backend-manojkumar-gudge && cd kasparro-backend-manojkumar-gudge
+export GITHUB_REPO=manojkumargudge/kasparro-backend-manojkumar-gudge
+openssl rand -hex 24      # run twice; save the two values in your password manager (owner key, demo key)
+read -s DATABASE_URL; export DATABASE_URL           # Neon direct URL from step 1
+read -s APP_API_KEY; export APP_API_KEY             # owner key (private, 60/min)
+read -s APP_DEMO_API_KEY; export APP_DEMO_API_KEY   # demo key (published in README, read-only, 20/min)
+# COINGECKO_API_KEY and COINPAPRIKA_API_KEY were read above; re-run `read -s` if this is a new shell.
 ./deploy/gcp/bootstrap.sh
+history | tail -15        # check: no secret values appear
 ```
 
-The script is idempotent. It:
+`bootstrap.sh` is idempotent and prints nothing secret. Values are piped to Secret Manager.
+It creates:
 
-- enables the Run, Artifact Registry, Secret Manager, Scheduler, IAM, STS, Logging and
-  Monitoring APIs;
-- creates the `kasparro` Docker repository in Artifact Registry;
-- creates three service accounts, each with the least access it needs:
-  - `kasparro-runtime`: what the service and job run as. It can read the four secrets and
-    write logs and metrics.
-  - `kasparro-deployer`: what GitHub Actions uses. It has Run admin, Artifact Registry writer
-    and Scheduler admin, can act as the runtime and scheduler accounts, can see secret
-    metadata, and can read the app key for the smoke test.
-  - `kasparro-scheduler`: has `run.invoker`, so Cloud Scheduler can start the job.
-- creates the Workload Identity pool `github` and the OIDC provider `github-oidc`, limited to
-  `assertion.repository == GITHUB_REPO`;
-- creates the four secrets and adds versions for any values you exported;
-- creates the four log-based metrics from `deploy/gcp/log-metrics/*.yaml`.
-
-To add or rotate a secret later:
-
-```bash
-printf %s "$VALUE" | gcloud secrets versions add kasparro-coinpaprika-api-key --data-file=-
-```
-
-The two upstream keys are optional. The deploy binds them only when they have a version;
-without them the CoinGecko and CoinPaprika keyless tiers are used.
+- the Artifact Registry repo `kasparro` and its 2-image cleanup policy;
+- three service accounts, each with the least access it needs: `kasparro-runtime` (reads
+  secrets, writes logs and metrics), `kasparro-deployer` (used by GitHub Actions via WIF),
+  and `kasparro-scheduler` (`run.invoker`);
+- the WIF pool `github` and provider `github-oidc`, restricted to `GITHUB_REPO`;
+- the 5 secrets;
+- the 4 log-based metrics.
 
 ## 4. Connect GitHub
 
-The script prints six `gh variable set …` commands at the end. Run them, or add the same
-values under *Settings → Secrets and variables → Actions → **Variables***. None of them are
-secrets:
+Run the 6 `gh variable set …` lines that `bootstrap.sh` prints, or add them under
+*Settings → Secrets and variables → Actions → Variables*. They are not secret. Optionally
+also set `COINPAPRIKA_BASE_URL` (see step 3).
 
-| Variable | Example |
-|---|---|
-| `GCP_PROJECT_ID` | `your-project-id` |
-| `GCP_REGION` | `us-central1` |
-| `GCP_WORKLOAD_IDENTITY_PROVIDER` | `projects/123456789/locations/global/workloadIdentityPools/github/providers/github-oidc` |
-| `GCP_DEPLOY_SERVICE_ACCOUNT` | `kasparro-deployer@your-project-id.iam.gserviceaccount.com` |
-| `GCP_RUNTIME_SERVICE_ACCOUNT` | `kasparro-runtime@your-project-id.iam.gserviceaccount.com` |
-| `GCP_SCHEDULER_SERVICE_ACCOUNT` | `kasparro-scheduler@your-project-id.iam.gserviceaccount.com` |
+When pasting values in the GitHub UI, paste **only** the value: no leading spaces, no
+newline, and not the table header (`Variable name … Value`). Check with:
+
+```bash
+gh variable list --json name,value --jq '.[]|"\(.name)=\(.value|@json)"'
+```
 
 ## 5. Deploy
 
-Push to `main`, or open *Actions → Deploy → Run workflow*. On the first deploy the workflow
-starts the ETL job once before the smoke test, so `/health` has data. The job summary shows
-the service URL.
+```bash
+gh workflow run deploy.yml --ref main      # or push to main
+gh run watch
+```
 
-**Make the GHCR image public for evaluators (one time).** On GitHub open *Your profile →
-Packages → kasparro-backend → Package settings → Change visibility → Public*. After that:
+The deploy job does the following, and fails if anything goes wrong:
+
+1. Validates the `GCP_*` repository variables: none may be empty, contain whitespace or a
+   newline, or have the wrong format.
+2. Checks that the four required secrets have a version (CoinPaprika is optional).
+3. Builds and pushes the image.
+4. Deploys the service with `RUN_ETL_ON_STARTUP=false`, so the ETL runs only from the job.
+5. Deploys the job.
+6. Upserts the hourly scheduler.
+7. Requires **`/health` → HTTP 200**.
+8. Starts one ETL execution if none has succeeded yet.
+9. Runs `scripts/smoke_test.py`.
+
+The service URL is in the job summary.
+
+## 6. Verify (definition of done)
 
 ```bash
-docker pull ghcr.io/manojkumargudge/kasparro-backend:latest
+URL=$(gcloud run services describe kasparro-api --region $REGION --format 'value(status.url)')
+curl -s -o /dev/null -w '%{http_code}\n' "$URL/health"                       # 200
+curl -s "$URL/health" | jq '.etl.sources'                                     # one run per source
+curl -s -H "X-API-KEY: $APP_API_KEY" "$URL/runs?limit=4" | jq '.runs[] | {source,status,records_in,records_inserted}'
+gcloud logging read 'resource.type="cloud_run_job" AND jsonPayload.event="etl_run_finished"' --limit 4 \
+  --format 'value(jsonPayload.source,jsonPayload.status,jsonPayload.records_in)'
+gcloud logging read 'resource.type="cloud_run_job" AND jsonPayload.auth="api_key"' --limit 2 \
+  --format 'value(jsonPayload.message)'                                      # "coingecko auth: API key via ..."
 ```
 
-## 6. Demo checklist (what to show in the console)
+To confirm the real keys are used, check the request counters in the CoinGecko and
+CoinPaprika dashboards after a run. The log line above shows only the header name, never
+the value.
 
-Set `URL=$(gcloud run services describe kasparro-api --region $REGION --format 'value(status.url)')`.
+**Cron runs:** *Cloud Scheduler → kasparro-etl-hourly* shows last run and status;
+*Cloud Run → Jobs → kasparro-etl → Executions* shows one execution per hour. To force a run:
+`gcloud scheduler jobs run kasparro-etl-hourly --location $REGION`.
 
-**Public API** (F.3)
+**Logs Explorer queries:**
 
-```bash
-curl -s "$URL/health" | jq
-curl -s -H "X-API-KEY: $APP_API_KEY" "$URL/data?limit=5&sort=market_cap" | jq
-curl -s -H "X-API-KEY: $APP_API_KEY" "$URL/runs?limit=5" | jq
-curl -s "$URL/metrics" | head -40
-```
+- `jsonPayload.event="etl_run_finished"`
+- `jsonPayload.status="failed"`
+- `severity>=WARNING`
 
-**Cron runs** (F.4)
+**Metrics Explorer:** *Logging → User-defined* lists `logging/user/kasparro_etl_run_success`,
+`…_failure`, `…_records_in` and `…_records_inserted`.
 
-- Console: *Cloud Scheduler* shows `kasparro-etl-hourly` with the schedule `0 * * * *`, last
-  run and result.
-- Trigger a run immediately: `gcloud scheduler jobs run kasparro-etl-hourly --location $REGION`
-- Console: *Cloud Run → Jobs → kasparro-etl → Executions* shows one execution per hour, each
-  with status, duration and logs.
-  CLI: `gcloud run jobs executions list --job kasparro-etl --region $REGION`
-- The API shows the same runs: `GET /runs?limit=10` lists one row per source per execution.
-
-**Logs** (F.5). In *Logging → Logs Explorer*, use these queries. Severity is mapped from the
-JSON `severity` field, so the level filter works.
-
-```text
-resource.type="cloud_run_job" AND resource.labels.job_name="kasparro-etl"
-jsonPayload.event="etl_run_finished"
-jsonPayload.event="etl_run_finished" AND jsonPayload.status="failed"
-severity>=WARNING AND jsonPayload.message:"Schema drift"
-resource.type="cloud_run_revision" AND resource.labels.service_name="kasparro-api"
-```
-
-**Metrics** (F.5). In *Monitoring → Metrics Explorer*, choose *Logging → User-defined*:
-
-- `logging/user/kasparro_etl_run_success`: runs per source (group by `source`)
-- `logging/user/kasparro_etl_run_failure`: failed runs per source
-- `logging/user/kasparro_etl_records_in` and `…_records_inserted`: records per run
-  (distributions)
-
-Built-in Cloud Run metrics (request count, latency, instance count) are on the service's
-*Metrics* tab. To alert on failures, create an alerting policy on
-`kasparro_etl_run_failure > 0` over 1 hour.
-
-**Restart + resume** (F.7). Crash a run partway through, then resume it:
+**Crash and resume:**
 
 ```bash
 gcloud run jobs execute kasparro-etl --region $REGION --wait \
-  --update-env-vars ETL_SOURCES=coinpaprika,ETL_BATCH_SIZE=10,FAIL_AFTER_N=25,FAIL_MODE=exit   # exits 70
+  --update-env-vars ETL_SOURCES=coinpaprika,ETL_BATCH_SIZE=10,FAIL_AFTER_N=25,FAIL_MODE=exit   # fails (exit 70)
 gcloud run jobs execute kasparro-etl --region $REGION --wait --update-env-vars ETL_SOURCES=coinpaprika
-curl -s -H "X-API-KEY: $APP_API_KEY" "$URL/runs?limit=4&source=coinpaprika" | jq '.runs[] | {status, error, records_in, records_unchanged, records_inserted}'
 ```
 
-You should see the crashed run as `failed` with the error `abandoned: …`, then a
-`success` run whose `records_unchanged` covers the batches committed before the crash.
-`--update-env-vars` on `execute` applies only to that one execution.
+## 7. Measure cold start
 
-**Full live smoke test** (F.7), from any machine:
+Cloud Run scales an idle service to zero, after roughly 15 idle minutes. To measure a cold
+start, wait **≥ 20 minutes** with no traffic, then:
 
 ```bash
-python scripts/smoke_test.py --base-url "$URL" --api-key "$APP_API_KEY" \
-  --crash-cmd  "gcloud run jobs execute kasparro-etl --region $REGION --wait --update-env-vars ETL_SOURCES=coinpaprika,ETL_BATCH_SIZE=10,FAIL_AFTER_N=25,FAIL_MODE=exit" \
-  --resume-cmd "gcloud run jobs execute kasparro-etl --region $REGION --wait --update-env-vars ETL_SOURCES=coinpaprika"
+curl -s -o /dev/null -w 'cold: %{http_code} in %{time_total}s\n' "$URL/health"
+curl -s -o /dev/null -w 'warm: %{http_code} in %{time_total}s\n' "$URL/health"
 ```
 
-It checks ingest, data, stats, metrics, resume and rate limiting (429 + `Retry-After`).
-The rate-limit check uses up the key's budget for the current minute.
+Repeat 3 times, idling between tries. A cold start includes container start, the migration
+check, and waking a suspended Neon compute.
 
-## 7. Costs and teardown
-
-At hourly runs this stays within the free tiers of Cloud Run, Scheduler (3 free jobs),
-Secret Manager, Logging and Neon. To remove everything:
+## 8. Teardown
 
 ```bash
 gcloud scheduler jobs delete kasparro-etl-hourly --location $REGION
 gcloud run jobs delete kasparro-etl --region $REGION
 gcloud run services delete kasparro-api --region $REGION
 gcloud artifacts repositories delete kasparro --location $REGION
+# or delete the whole project:  gcloud projects delete "$PROJECT_ID"
 ```
-
-## Known limitations
-
-- `/metrics` is in Prometheus format, but Cloud Run does not scrape it on its own. The console
-  metrics come from log-based metrics plus Cloud Run's built-in ones. To scrape `/metrics`,
-  add a Managed Service for Prometheus sidecar.
-- The CI smoke test skips the crash/resume and rate-limit checks so that deploys stay fast and
-  don't use up the key's budget. Run them manually with the command above.
-- This guide and its scripts were written without access to a GCP project. The workflow
-  passes actionlint and the bootstrap script passes shellcheck, but neither has been run
-  against a real project yet.

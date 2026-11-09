@@ -22,6 +22,26 @@ def no_app_key(headers: dict[str, str]) -> None:
 
 
 # ----------------------------------------------------------------- auth + URLs
+@pytest.mark.parametrize(
+    "source_cls,env,header",
+    [
+        (coingecko.CoinGeckoSource, "COINGECKO_API_KEY", "x-cg-demo-api-key"),
+        (coinpaprika.CoinPaprikaSource, "COINPAPRIKA_API_KEY", "Authorization"),
+    ],
+)
+def test_auth_mode_is_logged_without_the_key(up, monkeypatch, caplog, source_cls, env, header):
+    up.queue(FakeResponse([]))
+    list(source_cls().fetch())
+    keyless = [r for r in caplog.records if getattr(r, "auth", None)]
+    assert keyless[-1].auth == "keyless"
+
+    monkeypatch.setenv(env, "real-key-value-123")
+    list(source_cls().fetch())
+    keyed = [r for r in caplog.records if getattr(r, "auth", None)][-1]
+    assert keyed.auth == "api_key" and header in keyed.getMessage()
+    assert "real-key-value-123" not in caplog.text
+
+
 def test_coingecko_keyless(up):
     up.queue(FakeResponse([]))
     list(coingecko.CoinGeckoSource().fetch())
@@ -129,9 +149,22 @@ def test_connection_errors_retry_then_give_up(up, monkeypatch):
 
 
 def test_invalid_json_is_fetch_error(up):
-    up.queue(FakeResponse(ValueError("not json")))
+    up.queue(FakeResponse(requests.JSONDecodeError("not json", "<html>", 0)))
     with pytest.raises(http.FetchError, match="invalid JSON"):
         http.get_json("coingecko", "https://x")
+
+
+@pytest.mark.parametrize(
+    "exc_type",
+    [requests.exceptions.InvalidURL, requests.exceptions.InvalidSchema, requests.exceptions.MissingSchema],
+)
+def test_url_errors_are_not_reported_as_invalid_json(up, exc_type):
+    # These are ValueError subclasses; the old `except ValueError` mislabeled them as invalid JSON.
+    assert issubclass(exc_type, ValueError)
+    up.queue(exc_type("bad url"))
+    with pytest.raises(exc_type):
+        http.get_json("coingecko", "https://x")
+    assert len(up.calls) == 1  # not retried either
 
 
 def test_secret_headers_never_logged(up, monkeypatch, caplog):

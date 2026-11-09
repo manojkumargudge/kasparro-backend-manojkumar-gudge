@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # One-time (idempotent) GCP setup for kasparro-backend. Safe to re-run.
 #
-#   PROJECT_ID=my-project REGION=us-central1 GITHUB_REPO=owner/repo ./deploy/gcp/bootstrap.sh
+#   PROJECT_ID=my-project REGION=asia-south1 GITHUB_REPO=owner/repo ./deploy/gcp/bootstrap.sh
 #
-# Optional: export DATABASE_URL / APP_API_KEY / COINGECKO_API_KEY / COINPAPRIKA_API_KEY
-# beforehand to store them in Secret Manager (values are piped, never printed).
+# Secret values: enter them beforehand with `read -s VAR; export VAR` (no shell history) for
+# DATABASE_URL, APP_API_KEY, APP_DEMO_API_KEY, COINGECKO_API_KEY, COINPAPRIKA_API_KEY.
+# They are piped to Secret Manager and never printed.
 # Requires: gcloud (authenticated as a project owner). See docs/DEPLOY_GCP.md.
 set -euo pipefail
 
 : "${PROJECT_ID:?set PROJECT_ID}"
 : "${GITHUB_REPO:?set GITHUB_REPO (owner/repo)}"
-REGION="${REGION:-us-central1}"
+REGION="${REGION:-asia-south1}"
 AR_REPO="${AR_REPO:-kasparro}"
 POOL="${WIF_POOL:-github}"
 PROVIDER="${WIF_PROVIDER:-github-oidc}"
@@ -35,6 +36,9 @@ log "Artifact Registry repository ${AR_REPO} (${REGION})"
 exists gcloud artifacts repositories describe "$AR_REPO" --location "$REGION" ||
   gcloud artifacts repositories create "$AR_REPO" --repository-format=docker --location "$REGION" \
     --description "kasparro-backend images"
+# Stay inside the 0.5 GB Artifact Registry free allowance: keep the 2 newest images only.
+gcloud artifacts repositories set-cleanup-policies "$AR_REPO" --location "$REGION" \
+  --policy "$HERE/ar-cleanup-policy.json" --no-dry-run >/dev/null
 
 log "Service accounts"
 for sa in kasparro-runtime kasparro-deployer kasparro-scheduler; do
@@ -74,17 +78,22 @@ log "Secret Manager"
 SECRETS=(
   "kasparro-database-url|DATABASE_URL|required"
   "kasparro-app-api-key|APP_API_KEY|required"
-  "kasparro-coingecko-api-key|COINGECKO_API_KEY|optional"
+  "kasparro-demo-api-key|APP_DEMO_API_KEY|required"
+  "kasparro-coingecko-api-key|COINGECKO_API_KEY|required"
   "kasparro-coinpaprika-api-key|COINPAPRIKA_API_KEY|optional"
 )
 for entry in "${SECRETS[@]}"; do
   IFS='|' read -r name var kind <<<"$entry"
+  if [[ "$kind" == "optional" && -z "${!var:-}" ]] && ! exists gcloud secrets describe "$name"; then
+    echo "   skipping optional secret $name (no $var configured)"
+    continue
+  fi
   exists gcloud secrets describe "$name" || gcloud secrets create "$name" --replication-policy automatic
   if [[ -n "${!var:-}" ]]; then
     printf '%s' "${!var}" | gcloud secrets versions add "$name" --data-file=- >/dev/null
     echo "   stored a new version of $name (from \$$var)"
   elif ! gcloud secrets versions list "$name" --filter state=ENABLED --limit 1 --format 'value(name)' | grep -q .; then
-    echo "   $name has no value yet ($kind): printf %s \"\$VALUE\" | gcloud secrets versions add $name --data-file=-"
+    echo "   $name has no value yet ($kind): read -s VALUE; printf %s \"\$VALUE\" | gcloud secrets versions add $name --data-file=-"
   fi
   gcloud secrets add-iam-policy-binding "$name" --member "serviceAccount:$RUNTIME_SA" \
     --role roles/secretmanager.secretAccessor >/dev/null

@@ -3,10 +3,10 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from api.deps import get_db, rate_limited_client
+from api.deps import get_db, read_client
 from services import runs as run_service
 
-router = APIRouter(tags=["etl"], dependencies=[Depends(rate_limited_client)])
+router = APIRouter(tags=["etl"], dependencies=[Depends(read_client)])
 
 
 @router.get("/stats")
