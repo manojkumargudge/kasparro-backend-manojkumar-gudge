@@ -9,7 +9,7 @@ Requirements are in [`docs/BRIEF.md`](docs/BRIEF.md). The [coverage table](#brie
 below maps each requirement to its code and the test that proves it. Cloud deployment
 (GCP) is prepared but not yet live; see [`docs/DEPLOY_GCP.md`](docs/DEPLOY_GCP.md).
 
-CI on `main` runs ruff (lint + format), mypy, actionlint, shellcheck, **142 tests against
+CI on `main` runs ruff (lint + format), mypy, actionlint, shellcheck, **146 tests against
 PostgreSQL** with a coverage gate of 85% (currently 95%), a Docker build, and `make test`.
 
 ## Live deployment
