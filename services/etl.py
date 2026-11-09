@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 from core.config import env_int, env_str
 from core.db import SessionLocal, engine
 from core.models import ApiRateLimit, Checkpoint, EtlRun
+from core.redact import redact
 from ingestion.base import Source
 from ingestion.drift import DriftRejected
 from ingestion.registry import selected_sources
@@ -221,7 +222,7 @@ def _run_locked(source: Source, run_group: str) -> SourceRunResult:
             if isinstance(exc, DriftRejected):
                 run.drift = exc.report.model_dump(mode="json")
             run.status = "failed"
-            run.error = f"{type(exc).__name__}: {exc}"[:2000]
+            run.error = (redact(f"{type(exc).__name__}: {exc}") or "")[:2000]
             log.error("%s run failed: %s", source.name, run.error, extra={"source": source.name})
         run.ended_at = dt.datetime.now(dt.UTC)
         run.duration_seconds = round(time.monotonic() - clock, 3)

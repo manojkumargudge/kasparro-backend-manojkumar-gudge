@@ -17,10 +17,11 @@ PostgreSQL** with a coverage gate of 85% (currently 95%), a Docker build, and `m
 | | |
 |---|---|
 | **Live URL** | _pending first deploy_ (`/health`, `/docs`) |
+| **Reviewer demo key** | _published here after the first deploy_. Read-only, 20 requests/min. Send it as `X-API-KEY` |
 | **Region** | GCP `asia-south1` (Mumbai); Neon Postgres in AWS `ap-south-1` (Mumbai) |
 | **API** | Cloud Run service `kasparro-api`, `min-instances 0`, `max-instances 2`, `RUN_ETL_ON_STARTUP=false` |
 | **ETL** | Cloud Run job `kasparro-etl`, started hourly by Cloud Scheduler (`0 * * * *` UTC) |
-| **Secrets** | Secret Manager only: `DATABASE_URL`, `APP_API_KEY`, `COINGECKO_API_KEY`, `COINPAPRIKA_API_KEY` |
+| **Secrets** | Secret Manager only: `DATABASE_URL`, `APP_API_KEY` (owner), `APP_DEMO_API_KEY` (demo), `COINGECKO_API_KEY`, `COINPAPRIKA_API_KEY` |
 | **Deploy** | `.github/workflows/deploy.yml` through Workload Identity Federation (no JSON keys); fails unless `/health` returns 200 |
 
 ```text
@@ -70,9 +71,9 @@ lowest figure seen (180,000).
    coins · coin_source_mapping · price_snapshots · raw_coins · checkpoints · etl_runs · api_rate_limits
                                               ▲
                  ┌───────────── api/ (FastAPI) ┴───────────────────────────┐
-                 │ deps.py: X-API-KEY auth + per-key rate limit (Postgres) │
-                 │ /data  /stats  /runs  /compare-runs     (key required)  │
-                 │ /health  /metrics  /dashboard  /docs    (public)        │
+                 │ deps.py: X-API-KEY auth, scopes, per-key rate limit (PG)│
+                 │ /data /stats /runs /compare-runs /metrics (key: read)   │
+                 │ /health /docs /redoc /openapi.json /dashboard (public)  │
                  └──────────────────────────────────────────────────────────┘
 ```
 
@@ -95,7 +96,7 @@ Prerequisites: Docker with Compose v2 and `make`. Python 3.11 only for local dev
 
 ```bash
 cp .env.example .env      # set APP_API_KEY; the upstream keys are optional
-export APP_API_KEY=...    # same value as in .env (curl and `make smoke` read it from the shell)
+read -s APP_API_KEY; export APP_API_KEY   # same value as in .env (curl and `make smoke` read it from the shell)
 make up                   # build, start Postgres + API; migrations and the first ETL run automatically
 curl -s localhost:8001/health
 curl -s -H "X-API-KEY: $APP_API_KEY" "localhost:8001/data?limit=5&sort=market_cap"
@@ -134,12 +135,29 @@ It is created if missing, and its schema is dropped and rebuilt.
 | GET | `/runs?limit=N&source=` | key | Most recent `etl_runs` rows (status, timings, record counts, error, checkpoint, drift) |
 | GET | `/compare-runs?source=&window=20&min_samples=5&sigma=3` | key | Per-source history, deltas and anomaly flags |
 | GET | `/health` | public | DB status + latest run per source. `ok`; `degraded` if a source's latest run failed; HTTP 503 `down` if the DB is unreachable |
-| GET | `/metrics` | public | Prometheus text format (no secrets) |
-| GET | `/dashboard`, `/docs` | public | Static dashboard, Swagger UI |
+| GET | `/metrics` | key | Prometheus text format (no secrets) |
+| GET | `/docs`, `/redoc`, `/openapi.json` | public | API docs |
+| GET | `/dashboard` | public | Static page; it calls the API with the key you enter (kept in sessionStorage) |
 
-Protected routes take an `X-API-KEY` header and count against that key's rate limit.
-Responses carry `X-RateLimit-Limit/Remaining/Reset` headers. Over the limit you get
-`429` with `Retry-After`.
+Keyed routes need an `X-API-KEY` header whose key has the `read` scope. Each key has its
+**own** rate limit (fixed window, counted in Postgres by key fingerprint; there's no
+IP-based limiting):
+
+| Key | Env var | Limit | Scopes |
+|---|---|---|---|
+| Owner (private) | `APP_API_KEY` | `API_RATE_LIMIT` (60/min) | `read`, `admin` |
+| Demo (published for reviewers) | `APP_DEMO_API_KEY` | `DEMO_API_RATE_LIMIT` (20/min) | `read` |
+| Extra | `APP_API_KEYS="label:key:limit[:scope+scope],…"` | per entry | per entry (default `read`) |
+
+`admin` is reserved for future write routes; none exist today. Responses carry
+`X-RateLimit-Limit/Remaining/Reset` headers.
+- Over the limit: `429` with `Retry-After`.
+- Missing or wrong key: `401`.
+- Valid key without the needed scope: `403`.
+
+Error text in `/runs`, `/compare-runs` and `/health` is scrubbed of URLs, auth headers,
+DSNs, DB hosts/IPs, SQL and configured secret values (`core/redact.py`). This happens when
+the error is stored and again when it is returned.
 
 ---
 
@@ -148,9 +166,10 @@ Responses carry `X-RateLimit-Limit/Remaining/Reset` headers. Over the limit you 
 | Variable | Default | Purpose |
 |---|---|---|
 | `DATABASE_URL` | — (required) | PostgreSQL URL. Neon: direct endpoint with `?sslmode=require` |
-| `APP_API_KEY`, `APP_API_KEYS` | — | Accepted client keys (`APP_API_KEYS` is comma-separated). Never sent upstream; only SHA-256 fingerprints are stored |
-| `COINGECKO_API_KEY` | empty | Sent as `x-cg-demo-api-key` when set; keyless public tier otherwise |
-| `COINPAPRIKA_API_KEY` | empty | Sent as `Authorization` when set; the free host doesn't need it |
+| `APP_API_KEY`, `APP_DEMO_API_KEY`, `APP_API_KEYS` | — | Client keys (see [API](#api)). Never sent upstream; only SHA-256 fingerprints are stored |
+| `API_RATE_LIMIT`, `DEMO_API_RATE_LIMIT`, `API_RATE_WINDOW_SECONDS` | 60, 20, 60 | Owner/default limit, demo limit, window length |
+| `COINGECKO_API_KEY` | empty | Sent as `x-cg-demo-api-key` when set; keyless public tier otherwise (the cloud deploy requires it) |
+| `COINPAPRIKA_API_KEY` | empty | Sent as `Authorization` when set; the free host doesn't need it (the cloud deploy requires it) |
 | `COINGECKO_BASE_URL`, `COINPAPRIKA_BASE_URL` | public hosts | Host override (e.g. CoinPaprika Pro) |
 | `COINGECKO_PAGES`, `COINGECKO_PER_PAGE`, `COINPAPRIKA_LIMIT` | 1, 50, 50 | How many coins to fetch |
 | `<SOURCE>_MIN_INTERVAL` | 1.0 | Minimum seconds between requests to that source |
@@ -161,7 +180,6 @@ Responses carry `X-RateLimit-Limit/Remaining/Reset` headers. Over the limit you 
 | `RUN_ETL_ON_STARTUP`, `ETL_INTERVAL_SECONDS` | 1, 0 | API background ETL: once at startup / every N seconds |
 | `FAIL_ON_ERROR` | 1 | `run_etl.py` exits 1 if any source run failed |
 | `DRIFT_WARN_THRESHOLD`, `DRIFT_REJECT_THRESHOLD` | 0.90, 0.60 | Schema-drift confidence thresholds |
-| `API_RATE_LIMIT`, `API_RATE_WINDOW_SECONDS` | 60, 60 | Requests per key per window |
 | `FAIL_AFTER_N`, `FAIL_MODE`, `FAIL_SOURCES` | off, `raise`, all | Failure injection: crash after N records; `exit` kills the process |
 | `DB_STARTUP_TIMEOUT` | 30 | Seconds the API waits for the DB before failing startup |
 
@@ -230,7 +248,7 @@ run against a real cloud project.
 | P0.2 Unified schema | done | `core/models.py`, `services/store.py` | `test_etl.py::test_latest_observation_wins_across_sources` |
 | P0.3 Pydantic validation | done | `schemas/coin.py`, `services/etl.py::_validate` | `test_schemas.py`, `test_etl.py::test_invalid_rows_logged_and_counted` |
 | P0.4 Incremental | done | `ingestion/base.py`, `services/etl.py` | `test_etl.py::test_api_watermark_incremental`, `::test_csv_rereads_and_only_writes_changed_rows` |
-| P0.5 Secure key auth | done | `core/security.py`, `api/deps.py`, `ingestion/coingecko.py`, `ingestion/coinpaprika.py` | `test_api.py::test_protected_routes_require_key`, `test_http.py::test_coingecko_keyless` (app key never sent upstream), `::test_secret_headers_never_logged` |
+| P0.5 Secure key auth | done | `core/security.py`, `api/deps.py`, `ingestion/coingecko.py`, `ingestion/coinpaprika.py` | `test_api.py::test_protected_routes_require_key`, `test_auth.py` (per-key limits, scopes), `test_redact.py` (no URLs/headers/DSNs in errors), `test_http.py::test_coingecko_keyless` (app key never sent upstream), `::test_secret_headers_never_logged` |
 | P0.6 `/data` | done | `api/routers/data.py` | `test_api.py::test_get_data`, `::test_data_filters_sorting_pagination` |
 | P0.7 `/health` | done | `api/routers/health.py` | `test_api.py::test_health_*` |
 | P0.8 make / Docker / compose / README | done | `Makefile`, `Dockerfile`, `docker-compose.yml` | CI jobs `docker build` and `make test` |

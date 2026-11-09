@@ -103,7 +103,7 @@
       </div>
 
       <div class="controls" id="authControls">
-        <input id="apiKey" type="password" placeholder="Enter APP_API_KEY (example: testkey)" aria-label="API key" />
+        <input id="apiKey" type="password" placeholder="API key (reviewers: demo key from the README)" aria-label="API key" />
         <button id="loadBtn">Load dashboard</button>
       </div>
 
@@ -149,7 +149,7 @@
 
     <script>
       const state = {
-        apiKey: localStorage.getItem('kasparro_api_key') || '',
+        apiKey: sessionStorage.getItem('kasparro_api_key') || '',
       };
 
       const els = {
@@ -317,7 +317,7 @@
           const statusTone = health?.status === 'ok' ? 'ok' : health?.status === 'degraded' ? 'warn' : 'bad';
           setStatus(health?.status ? `${health.status.toUpperCase()} API` : 'API STATUS', statusTone);
 
-          localStorage.setItem('kasparro_api_key', state.apiKey);
+          sessionStorage.setItem('kasparro_api_key', state.apiKey);
           showToast('Dashboard loaded');
         } catch (err) {
           console.error(err);

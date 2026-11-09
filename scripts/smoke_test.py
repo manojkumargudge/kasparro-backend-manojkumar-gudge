@@ -7,7 +7,7 @@ Checks, in order (each prints PASS/FAIL/SKIP):
 1. ingest      ``/health`` is ok/degraded, DB up, at least one source has a successful run
 2. data        ``/data`` returns rows with ``request_id`` and ``api_latency_ms``
 3. stats       ``/stats`` reports processed records from ``etl_runs``
-4. metrics     ``/metrics`` is Prometheus text and contains no API key
+4. metrics     ``/metrics`` (keyed) is Prometheus text and contains no API key
 5. resume      (only with ``--crash-cmd`` and ``--resume-cmd``) the crash command kills an
                ETL run mid-way; after the resume command the crashed run is ``failed``
                (abandoned/injected) and a newer run of the same source succeeded and reused
@@ -86,7 +86,7 @@ def check_stats(c: Client) -> str:
 
 
 def check_metrics(c: Client) -> str:
-    status, headers, body = c.get("/metrics", auth=False)
+    status, headers, body = c.get("/metrics")
     text = body.decode()
     if status != 200 or "kasparro_etl_runs_total" not in text:
         raise SmokeFailure(f"/metrics -> {status}")

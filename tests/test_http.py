@@ -149,7 +149,7 @@ def test_connection_errors_retry_then_give_up(up, monkeypatch):
 
 
 def test_invalid_json_is_fetch_error(up):
-    up.queue(FakeResponse(ValueError("not json")))
+    up.queue(FakeResponse(requests.JSONDecodeError("not json", "<html>", 0)))
     with pytest.raises(http.FetchError, match="invalid JSON"):
         http.get_json("coingecko", "https://x")
 

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # One-time (idempotent) GCP setup for kasparro-backend. Safe to re-run.
 #
-#   PROJECT_ID=my-project REGION=us-central1 GITHUB_REPO=owner/repo ./deploy/gcp/bootstrap.sh
+#   PROJECT_ID=my-project REGION=asia-south1 GITHUB_REPO=owner/repo ./deploy/gcp/bootstrap.sh
 #
-# Optional: export DATABASE_URL / APP_API_KEY / COINGECKO_API_KEY / COINPAPRIKA_API_KEY
-# beforehand to store them in Secret Manager (values are piped, never printed).
+# Secret values: enter them beforehand with `read -s VAR; export VAR` (no shell history) for
+# DATABASE_URL, APP_API_KEY, APP_DEMO_API_KEY, COINGECKO_API_KEY, COINPAPRIKA_API_KEY.
+# They are piped to Secret Manager and never printed.
 # Requires: gcloud (authenticated as a project owner). See docs/DEPLOY_GCP.md.
 set -euo pipefail
 
@@ -77,6 +78,7 @@ log "Secret Manager"
 SECRETS=(
   "kasparro-database-url|DATABASE_URL|required"
   "kasparro-app-api-key|APP_API_KEY|required"
+  "kasparro-demo-api-key|APP_DEMO_API_KEY|required"
   "kasparro-coingecko-api-key|COINGECKO_API_KEY|required"
   "kasparro-coinpaprika-api-key|COINPAPRIKA_API_KEY|required"
 )
@@ -87,7 +89,7 @@ for entry in "${SECRETS[@]}"; do
     printf '%s' "${!var}" | gcloud secrets versions add "$name" --data-file=- >/dev/null
     echo "   stored a new version of $name (from \$$var)"
   elif ! gcloud secrets versions list "$name" --filter state=ENABLED --limit 1 --format 'value(name)' | grep -q .; then
-    echo "   $name has no value yet ($kind): printf %s \"\$VALUE\" | gcloud secrets versions add $name --data-file=-"
+    echo "   $name has no value yet ($kind): read -s VALUE; printf %s \"\$VALUE\" | gcloud secrets versions add $name --data-file=-"
   fi
   gcloud secrets add-iam-policy-binding "$name" --member "serviceAccount:$RUNTIME_SA" \
     --role roles/secretmanager.secretAccessor >/dev/null

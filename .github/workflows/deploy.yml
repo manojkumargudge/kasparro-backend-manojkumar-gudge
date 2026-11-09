@@ -104,10 +104,11 @@ jobs:
       - name: Secret bindings
         id: secrets
         run: |
-          # All four secrets are required (real upstream keys, not the keyless tiers).
+          # All five secrets are required (real upstream keys, not the keyless tiers).
           bindings=""
           missing=0
           for pair in DATABASE_URL=kasparro-database-url APP_API_KEY=kasparro-app-api-key \
+                      APP_DEMO_API_KEY=kasparro-demo-api-key \
                       COINGECKO_API_KEY=kasparro-coingecko-api-key COINPAPRIKA_API_KEY=kasparro-coinpaprika-api-key; do
             name="${pair#*=}"
             if gcloud secrets versions list "$name" --filter=state=ENABLED --limit=1 --format='value(name)' 2>/dev/null | grep -q .; then

@@ -48,6 +48,8 @@ API_KEY = "testkey"
 # core.db calls load_dotenv(), so a developer's .env must not leak into tests.
 _ISOLATED_ENV = (
     "APP_API_KEYS",
+    "APP_DEMO_API_KEY",
+    "DEMO_API_RATE_LIMIT",
     "CSV_PATH",
     "QUIRKY_CSV_PATH",
     "ETL_SOURCES",

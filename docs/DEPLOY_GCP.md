@@ -10,7 +10,7 @@ Region: **`asia-south1` (Mumbai)**.
 | ETL | Cloud Run job, `python scripts/run_etl.py` | `kasparro-etl` |
 | Hourly trigger | Cloud Scheduler `0 * * * *` (HTTP → Run Admin API) | `kasparro-etl-hourly` |
 | Images | Artifact Registry, cleanup policy keeps the 2 newest | `asia-south1-docker.pkg.dev/PROJECT/kasparro/kasparro-backend` |
-| Secrets | Secret Manager (all four required) | `kasparro-database-url`, `kasparro-app-api-key`, `kasparro-coingecko-api-key`, `kasparro-coinpaprika-api-key` |
+| Secrets | Secret Manager (all five required) | `kasparro-database-url`, `kasparro-app-api-key` (owner, 60/min), `kasparro-demo-api-key` (reviewers, read-only, 20/min), `kasparro-coingecko-api-key`, `kasparro-coinpaprika-api-key` |
 | Database | Neon Postgres, AWS ap-south-1 (Mumbai), direct endpoint, `sslmode=require` | — |
 | Logs / metrics | Cloud Logging + 4 log-based metrics | `kasparro_etl_run_success`, `_failure`, `_records_in`, `_records_inserted` |
 
@@ -38,12 +38,30 @@ There are no JSON service-account keys anywhere. The image contains no secrets
 | asia-south1 | Tier 1 since Nov 2024; free tier applied at Tier 1 prices | — | [Release notes](https://docs.cloud.google.com/run/docs/release-notes), [Locations](https://docs.cloud.google.com/run/docs/locations) |
 | Network egress | API responses to clients | 1 GB free **in North America only**; Mumbai egress is billed (fractions of a cent at demo volume) | [Cloud Run pricing](https://cloud.google.com/run/pricing) |
 | Cloud Scheduler | 1 job | 3 jobs per billing account | [GCP free tier](https://cloud.google.com/free) |
-| Secret Manager | 4 secrets × 1 version; ~3–4k reads/month | 6 active versions, 10,000 access ops | [GCP free tier](https://cloud.google.com/free) |
+| Secret Manager | 5 secrets × 1 version; ~4–5k reads/month | 6 active versions, 10,000 access ops | [GCP free tier](https://cloud.google.com/free) |
 | Artifact Registry | ~150–250 MB/image, 2 kept | 0.5 GB storage | [GCP free tier](https://cloud.google.com/free) |
 | Logging | small | 50 GiB/month | [GCP free tier](https://cloud.google.com/free) |
 
-Keep secret versions at 6 or fewer: when you rotate a secret, **destroy** the old version
-(`gcloud secrets versions destroy N --secret NAME`).
+With 5 secrets, only **one** spare version fits in the free 6. When you rotate a secret,
+**destroy** the old version (`gcloud secrets versions destroy N --secret NAME`).
+
+## Access model
+
+| Endpoint | Access |
+|---|---|
+| `/health`, `/docs`, `/redoc`, `/openapi.json`, `/dashboard` (static page; it uses the key you type in, kept in sessionStorage) | public |
+| `/data`, `/stats`, `/runs`, `/compare-runs`, `/metrics` | `X-API-KEY` with `read` scope |
+| future write/admin routes | `X-API-KEY` with `admin` scope (owner key only) |
+
+Each key has its own rate limit, counted in Postgres by key fingerprint. There is no
+IP-based limiting.
+
+- **Owner** (`APP_API_KEY`): 60/min, `read` + `admin`.
+- **Demo** (`APP_DEMO_API_KEY`): 20/min, `read`. Published in the README for reviewers.
+- **Extra keys** (`APP_API_KEYS`, format `label:key:limit[:scope+scope]`) are also possible.
+
+To scrape `/metrics` with Prometheus, set the header in the scrape config
+(`authorization`/`http_headers` → `X-API-KEY`).
 
 ---
 
@@ -56,7 +74,7 @@ created until you run the commands yourself.
 |---|---|---|
 | 1 | Neon project (outside GCP) | Neon free plan |
 | 2 | GCP project, billing link, **budget + alerts** | Budgets are free |
-| 3 `bootstrap.sh` | APIs enabled; Artifact Registry repo + cleanup policy; 3 service accounts; WIF pool/provider; 4 secrets + versions; 4 log-based metrics | AR storage, Secret Manager, Monitoring (all within the free allowance at this size). SAs, WIF and IAM are free |
+| 3 `bootstrap.sh` | APIs enabled; Artifact Registry repo + cleanup policy; 3 service accounts; WIF pool/provider; 5 secrets + versions; 4 log-based metrics | AR storage, Secret Manager, Monitoring (all within the free allowance at this size). SAs, WIF and IAM are free |
 | 5 deploy workflow | Cloud Run service, Cloud Run job, Cloud Scheduler job; one job execution | Cloud Run, Scheduler (within the free allowance) |
 
 ---
@@ -124,11 +142,15 @@ Get the upstream keys first:
   only means the host is reachable: it did not reject a made-up demo key in testing, so
   confirm the key through the request counter in the CoinGecko dashboard after the first ETL run.
 
+**Enter every secret with `read -s VAR; export VAR`.** The value is typed or pasted at a
+hidden prompt, so it never lands in shell history or on screen. Never put it on the command
+line (`export VAR=value` is saved to history).
+
   ```bash
-  read -rs CP_KEY
-  curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: $CP_KEY" https://api-pro.coinpaprika.com/v1/tickers/btc-bitcoin
-  read -rs CG_KEY
-  curl -s -o /dev/null -w '%{http_code}\n' -H "x-cg-demo-api-key: $CG_KEY" "https://api.coingecko.com/api/v3/ping"
+  read -s COINPAPRIKA_API_KEY; export COINPAPRIKA_API_KEY
+  curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: $COINPAPRIKA_API_KEY" https://api-pro.coinpaprika.com/v1/tickers/btc-bitcoin
+  read -s COINGECKO_API_KEY; export COINGECKO_API_KEY
+  curl -s -o /dev/null -w '%{http_code}\n' -H "x-cg-demo-api-key: $COINGECKO_API_KEY" "https://api.coingecko.com/api/v3/ping"
   ```
 
 Then, from a clone of the repo in Cloud Shell:
@@ -136,10 +158,13 @@ Then, from a clone of the repo in Cloud Shell:
 ```bash
 git clone https://github.com/manojkumargudge/kasparro-backend-manojkumar-gudge && cd kasparro-backend-manojkumar-gudge
 export GITHUB_REPO=manojkumargudge/kasparro-backend-manojkumar-gudge
-read -rs DATABASE_URL && export DATABASE_URL                 # Neon direct URL from step 1
-export APP_API_KEY="$(openssl rand -hex 24)"; echo "save this: $APP_API_KEY"
-export COINGECKO_API_KEY="$CG_KEY" COINPAPRIKA_API_KEY="$CP_KEY"
+openssl rand -hex 24      # run twice; save the two values in your password manager (owner key, demo key)
+read -s DATABASE_URL; export DATABASE_URL           # Neon direct URL from step 1
+read -s APP_API_KEY; export APP_API_KEY             # owner key (private, 60/min)
+read -s APP_DEMO_API_KEY; export APP_DEMO_API_KEY   # demo key (published in README, read-only, 20/min)
+# COINGECKO_API_KEY and COINPAPRIKA_API_KEY were read above; re-run `read -s` if this is a new shell.
 ./deploy/gcp/bootstrap.sh
+history | tail -15        # check: no secret values appear
 ```
 
 `bootstrap.sh` is idempotent and prints nothing secret. Values are piped to Secret Manager.
@@ -150,7 +175,7 @@ It creates:
   secrets, writes logs and metrics), `kasparro-deployer` (used by GitHub Actions via WIF),
   and `kasparro-scheduler` (`run.invoker`);
 - the WIF pool `github` and provider `github-oidc`, restricted to `GITHUB_REPO`;
-- the 4 secrets;
+- the 5 secrets;
 - the 4 log-based metrics.
 
 ## 4. Connect GitHub
@@ -168,7 +193,7 @@ gh run watch
 
 The deploy job does the following, and fails if anything goes wrong:
 
-1. Checks that all four secrets have a version.
+1. Checks that all five secrets have a version.
 2. Builds and pushes the image.
 3. Deploys the service with `RUN_ETL_ON_STARTUP=false`, so the ETL runs only from the job.
 4. Deploys the job.
