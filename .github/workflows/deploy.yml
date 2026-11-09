@@ -104,21 +104,27 @@ jobs:
       - name: Secret bindings
         id: secrets
         run: |
-          # All five secrets are required (real upstream keys, not the keyless tiers).
+          # Four required secrets; CoinPaprika authentication is optional.
           bindings=""
           missing=0
           for pair in DATABASE_URL=kasparro-database-url APP_API_KEY=kasparro-app-api-key \
                       APP_DEMO_API_KEY=kasparro-demo-api-key \
-                      COINGECKO_API_KEY=kasparro-coingecko-api-key COINPAPRIKA_API_KEY=kasparro-coinpaprika-api-key; do
+                      COINGECKO_API_KEY=kasparro-coingecko-api-key; do
             name="${pair#*=}"
             if gcloud secrets versions list "$name" --filter=state=ENABLED --limit=1 --format='value(name)' 2>/dev/null | grep -q .; then
               bindings="${bindings:+${bindings},}${pair}:latest"
             else
-              echo "::error::Secret ${name} has no enabled version (see docs/DEPLOY_GCP.md step 3)."
+              echo "::error::Required secret ${name} has no enabled version."
               missing=1
             fi
           done
           [ "$missing" = 0 ] || exit 1
+
+          if gcloud secrets versions list kasparro-coinpaprika-api-key --filter=state=ENABLED --limit=1 --format='value(name)' 2>/dev/null | grep -q .; then
+            bindings="${bindings},COINPAPRIKA_API_KEY=kasparro-coinpaprika-api-key:latest"
+          else
+            echo "CoinPaprika key absent; using free unauthenticated API."
+          fi
           echo "bindings=${bindings}" >> "$GITHUB_OUTPUT"
           # Non-secret runtime settings shared by the service and the job.
           envs="FAIL_ON_ERROR=1"

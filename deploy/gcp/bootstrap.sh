@@ -80,10 +80,14 @@ SECRETS=(
   "kasparro-app-api-key|APP_API_KEY|required"
   "kasparro-demo-api-key|APP_DEMO_API_KEY|required"
   "kasparro-coingecko-api-key|COINGECKO_API_KEY|required"
-  "kasparro-coinpaprika-api-key|COINPAPRIKA_API_KEY|required"
+  "kasparro-coinpaprika-api-key|COINPAPRIKA_API_KEY|optional"
 )
 for entry in "${SECRETS[@]}"; do
   IFS='|' read -r name var kind <<<"$entry"
+  if [[ "$kind" == "optional" && -z "${!var:-}" ]] && ! exists gcloud secrets describe "$name"; then
+    echo "   skipping optional secret $name (no $var configured)"
+    continue
+  fi
   exists gcloud secrets describe "$name" || gcloud secrets create "$name" --replication-policy automatic
   if [[ -n "${!var:-}" ]]; then
     printf '%s' "${!var}" | gcloud secrets versions add "$name" --data-file=- >/dev/null
