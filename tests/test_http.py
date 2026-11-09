@@ -154,6 +154,19 @@ def test_invalid_json_is_fetch_error(up):
         http.get_json("coingecko", "https://x")
 
 
+@pytest.mark.parametrize(
+    "exc_type",
+    [requests.exceptions.InvalidURL, requests.exceptions.InvalidSchema, requests.exceptions.MissingSchema],
+)
+def test_url_errors_are_not_reported_as_invalid_json(up, exc_type):
+    # These are ValueError subclasses; the old `except ValueError` mislabeled them as invalid JSON.
+    assert issubclass(exc_type, ValueError)
+    up.queue(exc_type("bad url"))
+    with pytest.raises(exc_type):
+        http.get_json("coingecko", "https://x")
+    assert len(up.calls) == 1  # not retried either
+
+
 def test_secret_headers_never_logged(up, monkeypatch, caplog):
     monkeypatch.setenv("COINPAPRIKA_API_KEY", "cp-secret-value")
     monkeypatch.setenv("COINPAPRIKA_MAX_RETRIES", "2")

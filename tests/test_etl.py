@@ -173,6 +173,15 @@ def test_fetch_failure_marks_run_failed(monkeypatch, db):
     assert "HTTP 404" in runs(db, "coinpaprika")[0].error
 
 
+def test_url_error_is_recorded_as_itself_not_invalid_json(monkeypatch, db):
+    import requests
+
+    FakeUpstream(monkeypatch).queue(requests.exceptions.InvalidURL("bad url"))
+    assert etl.run_source(CoinPaprikaSource()).status == "failed"
+    error = runs(db, "coinpaprika")[0].error
+    assert error.startswith("InvalidURL") and "invalid JSON" not in error
+
+
 # ----------------------------------------------------------------- crash + resume
 def test_injected_crash_then_resume_without_duplicates(write_csv, monkeypatch, db):
     monkeypatch.setenv("CSV_PATH", str(write_csv("crash.csv", ROWS)))

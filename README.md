@@ -14,10 +14,19 @@ PostgreSQL** with a coverage gate of 85% (currently 95%), a Docker build, and `m
 
 ## Live deployment
 
+**Try it:** open `<LIVE_URL>/dashboard` and paste the demo API key: `<DEMO_KEY>`.
+The demo key is read-only and limited to 20 requests/min.
+
+```bash
+curl -s -H "X-API-KEY: <DEMO_KEY>" "<LIVE_URL>/data?limit=5&sort=market_cap"
+```
+
+`<LIVE_URL>` and `<DEMO_KEY>` are filled in after the first deploy.
+
 | | |
 |---|---|
-| **Live URL** | _pending first deploy_ (`/health`, `/docs`) |
-| **Reviewer demo key** | _published here after the first deploy_. Read-only, 20 requests/min. Send it as `X-API-KEY` |
+| **Live URL** | `<LIVE_URL>` (public: `/health`, `/docs`, `/dashboard`) |
+| **Reviewer demo key** | `<DEMO_KEY>`: read-only, 20 requests/min, sent as `X-API-KEY` |
 | **Region** | GCP `asia-south1` (Mumbai); Neon Postgres in AWS `ap-south-1` (Mumbai) |
 | **API** | Cloud Run service `kasparro-api`, `min-instances 0`, `max-instances 2`, `RUN_ETL_ON_STARTUP=false` |
 | **ETL** | Cloud Run job `kasparro-etl`, started hourly by Cloud Scheduler (`0 * * * *` UTC) |
